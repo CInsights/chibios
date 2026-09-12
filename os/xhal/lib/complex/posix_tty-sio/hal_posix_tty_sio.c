@@ -43,6 +43,7 @@
 
 static void __ptty_update_tx_i(hal_posix_tty_sio_c *self);
 static void __ptty_push_output_i(hal_posix_tty_sio_c *self);
+static void __ptty_select_read(hal_posix_tty_sio_c *self);
 
 static void __ptty_input_init(ptty_input_queue_t *iqp) {
   size_t i;
@@ -57,12 +58,14 @@ static void __ptty_input_init(ptty_input_queue_t *iqp) {
   }
 }
 
-static void __ptty_attributes_default(struct termios *attrp) {
+static void __ptty_attributes_default(hal_posix_tty_sio_c *self) {
+  struct termios *attrp;
   size_t i;
 
+  attrp = &self->attributes;
   attrp->c_iflag  = ICRNL | IXON | IMAXBEL;
   attrp->c_oflag  = OPOST | ONLCR;
-  attrp->c_cflag  = CS8 | CREAD | CLOCAL;
+  attrp->c_cflag  = PTTY_REQUIRED_CFLAGS;
   attrp->c_lflag  = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL;
   for (i = 0U; i < NCCS; i++) {
     attrp->c_cc[i] = 0U;
@@ -79,6 +82,14 @@ static void __ptty_attributes_default(struct termios *attrp) {
   attrp->c_cc[VSUSP]  = 0x1AU;
   attrp->c_ispeed     = (speed_t)SIO_DEFAULT_BITRATE;
   attrp->c_ospeed     = (speed_t)SIO_DEFAULT_BITRATE;
+  __ptty_select_read(self);
+}
+
+/* Validation must see the full result even with 16-bit RT time types and
+   a high timer frequency; only validated read intervals may be narrowed.*/
+static uint64_t __ptty_vtime_interval(const struct termios *attrp) {
+
+  return ((uint64_t)attrp->c_cc[VTIME] * CH_CFG_ST_FREQUENCY + 9U) / 10U;
 }
 
 static bool __ptty_attributes_valid(hal_posix_tty_sio_c *self,
@@ -90,13 +101,16 @@ static bool __ptty_attributes_valid(hal_posix_tty_sio_c *self,
   if ((attrp->c_oflag & ~PTTY_SUPPORTED_OFLAGS) != 0U) {
     return false;
   }
-  if (attrp->c_cflag != (CS8 | CREAD | CLOCAL)) {
+  if (attrp->c_cflag != PTTY_REQUIRED_CFLAGS) {
     return false;
   }
   if ((attrp->c_lflag & ~PTTY_SUPPORTED_LFLAGS) != 0U) {
     return false;
   }
-  if ((attrp->c_cc[VMIN] != 1U) || (attrp->c_cc[VTIME] != 0U)) {
+  /* Canonical input ignores VTIME. Non-canonical intervals must fit
+     in the RT timer without becoming TIME_IMMEDIATE or TIME_INFINITE.*/
+  if (((attrp->c_lflag & ICANON) == 0U) &&
+      (__ptty_vtime_interval(attrp) > (uint64_t)TIME_MAX_INTERVAL)) {
     return false;
   }
   if ((attrp->c_ispeed != self->attributes.c_ispeed) ||
@@ -470,8 +484,16 @@ static void __ptty_update_tx_i(hal_posix_tty_sio_c *self) {
     mask |= SIO_EV_TX_END;
   }
   if (mask != current) {
+    /* Do not re-arm an unchanged TX-end source while TC is still asserted:
+       queued but flow-stopped output could otherwise cause an IRQ storm.*/
     sioWriteEnableFlagsX(self->siop, mask);
   }
+}
+
+static void __ptty_reset_drain_i(hal_posix_tty_sio_c *self) {
+
+  self->drain_waiting = false;
+  chThdDequeueAllI(&self->drainsync, MSG_RESET);
 }
 
 static void __ptty_resume_drain_i(hal_posix_tty_sio_c *self) {
@@ -482,7 +504,7 @@ static void __ptty_resume_drain_i(hal_posix_tty_sio_c *self) {
       oqIsEmptyI(&self->oqueue) &&
       !sioIsTXOngoingX(self->siop)) {
     self->drain_waiting = false;
-    chThdResumeI(&self->drainsync, MSG_OK);
+    chThdDequeueAllI(&self->drainsync, MSG_OK);
   }
 }
 
@@ -599,37 +621,13 @@ static size_t __ptty_write(hal_posix_tty_sio_c *self,
   return done;
 }
 
-static size_t __ptty_read(hal_posix_tty_sio_c *self,
-                          uint8_t *bp,
-                          size_t n) {
-  ptty_input_queue_t *iqp;
-  bool record_ended;
-  size_t done;
+/* Copies committed input, stopping at a record boundary or a full caller
+   buffer. A true result includes an empty EOF record.*/
+static bool __ptty_input_read_i(ptty_input_queue_t *iqp,
+                                uint8_t **bpp,
+                                size_t *np) {
 
-  chDbgCheck((bp != NULL) || (n == 0U));
-  if (n == 0U) {
-    return 0U;
-  }
-
-  iqp = &self->iqueue;
-  chSysLock();
-  while (iqp->committed == 0U) {
-    msg_t msg;
-
-    if (self->state != HAL_DRV_STATE_READY) {
-      chSysUnlock();
-      return 0U;
-    }
-    msg = chThdEnqueueTimeoutS(&iqp->waiting, TIME_INFINITE);
-    if (msg != MSG_OK) {
-      chSysUnlock();
-      return 0U;
-    }
-  }
-
-  done = 0U;
-  record_ended = false;
-  while ((done < n) && (iqp->committed > 0U)) {
+  while ((*np > 0U) && (iqp->committed > 0U)) {
     bool boundary;
     uint8_t b;
 
@@ -640,28 +638,194 @@ static size_t __ptty_read(hal_posix_tty_sio_c *self,
     iqp->committed--;
 
     if (boundary && (b == 0U)) {
-      record_ended = true;
-      break;
+      return true;
     }
-    bp[done++] = b;
+    *(*bpp)++ = b;
+    (*np)--;
     if (boundary) {
-      record_ended = true;
-      break;
+      return true;
     }
   }
-  if (!record_ended && (done == n) && (iqp->committed > 0U) &&
+  /* An exact-sized EOF record must not leave a spurious empty read.*/
+  if ((*np == 0U) && (iqp->committed > 0U) &&
       __ptty_input_is_boundary_i(iqp, iqp->read) &&
       (iqp->buffer[iqp->read] == 0U)) {
     __ptty_input_clear_boundary_i(iqp, iqp->read);
     iqp->read = __ptty_input_advance(iqp->read);
     iqp->committed--;
   }
-  if (iqp->committed > 0U) {
-    __ptty_input_wakeup_i(self);
+
+  return *np == 0U;
+}
+
+/* Waits against an existing deadline; bare wakeups never rearm it.*/
+static msg_t __ptty_read_wait_s(hal_posix_tty_sio_c *self,
+                                systime_t started,
+                                sysinterval_t interval) {
+  sysinterval_t timeout;
+  msg_t msg;
+
+  timeout = interval;
+  if (interval != TIME_INFINITE) {
+    sysinterval_t elapsed;
+
+    elapsed = chTimeDiffX(started, chVTGetSystemTimeX());
+    if (elapsed >= interval) {
+      return MSG_TIMEOUT;
+    }
+    timeout -= elapsed;
+  }
+  msg = chThdEnqueueTimeoutS(&self->iqueue.waiting, timeout);
+  if (self->state != HAL_DRV_STATE_READY) {
+    return MSG_RESET;
+  }
+
+  return msg;
+}
+
+/* MIN = 0, TIME = 0: never waits.*/
+static size_t __ptty_read_poll_s(hal_posix_tty_sio_c *self,
+                                 uint8_t *bp,
+                                 size_t n,
+                                 msg_t *msgp) {
+  uint8_t *startp;
+
+  startp = bp;
+  if (!__ptty_input_read_i(&self->iqueue, &bp, &n) && (bp == startp)) {
+    *msgp = MSG_TIMEOUT;
+  }
+
+  return (size_t)(bp - startp);
+}
+
+/* MIN > 0, TIME = 0, or canonical input with an effective minimum of one.
+   The input queue supplies canonical record boundaries in either case.*/
+static size_t __ptty_read_blocking_s(hal_posix_tty_sio_c *self,
+                                     uint8_t *bp,
+                                     size_t n,
+                                     msg_t *msgp) {
+  uint8_t *startp;
+  size_t minimum;
+
+  startp = bp;
+  minimum = (self->attributes.c_lflag & ICANON) != 0U ?
+            1U : (size_t)self->attributes.c_cc[VMIN];
+  while (!__ptty_input_read_i(&self->iqueue, &bp, &n) &&
+         ((size_t)(bp - startp) < minimum)) {
+    *msgp = __ptty_read_wait_s(self, 0U, TIME_INFINITE);
+    if (*msgp != MSG_OK) {
+      break;
+    }
+  }
+
+  return (size_t)(bp - startp);
+}
+
+/* MIN = 0, TIME > 0: one deadline starting at read entry.*/
+static size_t __ptty_read_timed_s(hal_posix_tty_sio_c *self,
+                                  uint8_t *bp,
+                                  size_t n,
+                                  msg_t *msgp) {
+  uint8_t *startp;
+  sysinterval_t interval;
+  systime_t started;
+
+  startp = bp;
+  interval = (sysinterval_t)__ptty_vtime_interval(&self->attributes);
+  started = chVTGetSystemTimeX();
+  while (!__ptty_input_read_i(&self->iqueue, &bp, &n) && (bp == startp)) {
+    *msgp = __ptty_read_wait_s(self, started, interval);
+    if (*msgp != MSG_OK) {
+      break;
+    }
+  }
+
+  return (size_t)(bp - startp);
+}
+
+/* MIN > 0, TIME > 0: no first-byte deadline, then an inter-byte timer.*/
+static size_t __ptty_read_interbyte_s(hal_posix_tty_sio_c *self,
+                                      uint8_t *bp,
+                                      size_t n,
+                                      msg_t *msgp) {
+  uint8_t *startp;
+  size_t minimum;
+  sysinterval_t interval;
+  systime_t started;
+
+  startp = bp;
+  minimum = (size_t)self->attributes.c_cc[VMIN];
+  interval = (sysinterval_t)__ptty_vtime_interval(&self->attributes);
+  started = 0U;
+  while (true) {
+    size_t previous;
+
+    previous = n;
+    if (__ptty_input_read_i(&self->iqueue, &bp, &n) ||
+        ((size_t)(bp - startp) >= minimum)) {
+      break;
+    }
+    if (n < previous) {
+      started = chVTGetSystemTimeX();
+    }
+    *msgp = __ptty_read_wait_s(self, started,
+                               bp == startp ? TIME_INFINITE : interval);
+    if (*msgp != MSG_OK) {
+      break;
+    }
+  }
+
+  return (size_t)(bp - startp);
+}
+
+/* Called during object initialization or with the system locked.*/
+static void __ptty_select_read(hal_posix_tty_sio_c *self) {
+
+  if (((self->attributes.c_lflag & ICANON) != 0U) ||
+      ((self->attributes.c_cc[VMIN] > 0U) &&
+       (self->attributes.c_cc[VTIME] == 0U))) {
+    self->readf = __ptty_read_blocking_s;
+  }
+  else if (self->attributes.c_cc[VTIME] == 0U) {
+    self->readf = __ptty_read_poll_s;
+  }
+  else if (self->attributes.c_cc[VMIN] == 0U) {
+    self->readf = __ptty_read_timed_s;
+  }
+  else {
+    self->readf = __ptty_read_interbyte_s;
+  }
+}
+
+static size_t __ptty_read(hal_posix_tty_sio_c *self,
+                          uint8_t *bp,
+                          size_t n,
+                          msg_t *msgp) {
+  size_t done;
+
+  chDbgCheck((bp != NULL) || (n == 0U));
+  *msgp = MSG_OK;
+  if (n == 0U) {
+    return 0U;
+  }
+
+  done = 0U;
+  chSysLock();
+  if (self->state == HAL_DRV_STATE_READY) {
+    done = self->readf(self, bp, n, msgp);
+    if (self->iqueue.committed > 0U) {
+      __ptty_input_wakeup_i(self);
+    }
+  }
+  else {
+    *msgp = MSG_RESET;
   }
   chSchRescheduleS();
   chSysUnlock();
 
+  if ((done == 0U) && (*msgp == MSG_OK)) {
+    *msgp = MSG_RESET;
+  }
   return done;
 }
 
@@ -673,8 +837,6 @@ static msg_t __ptty_drain(hal_posix_tty_sio_c *self) {
     chSysUnlock();
     return HAL_RET_INV_STATE;
   }
-  chDbgAssert(!self->drain_waiting, "another drain operation is active");
-
   while (self->flow_pending ||
          !qIsEmptyI(&self->equeue) ||
          !oqIsEmptyI(&self->oqueue) ||
@@ -684,8 +846,9 @@ static msg_t __ptty_drain(hal_posix_tty_sio_c *self) {
     if (!self->drain_waiting) {
       continue;
     }
-    msg = chThdSuspendS(&self->drainsync);
-    self->drain_waiting = false;
+    msg = chThdEnqueueTimeoutS(&self->drainsync, TIME_INFINITE);
+    /* Completion/reset owns drain_waiting. Another caller may already
+       have started a new drain before this waiter gets to run again.*/
     if (msg != MSG_OK) {
       chSysUnlock();
       return HAL_RET_INV_STATE;
@@ -709,6 +872,7 @@ static void __ptty_apply_attributes_i(hal_posix_tty_sio_c *self,
 
   was_canonical = (self->attributes.c_lflag & ICANON) != 0U;
   self->attributes = *attrp;
+  __ptty_select_read(self);
 
   if (was_canonical && ((attrp->c_lflag & ICANON) == 0U)) {
     __ptty_input_commit_i(self);
@@ -765,7 +929,9 @@ static size_t __ptty_tty_write_impl(void *ip, const uint8_t *bp, size_t n) {
 static size_t __ptty_tty_read_impl(void *ip, uint8_t *bp, size_t n) {
   hal_posix_tty_sio_c *self = oopIfGetOwner(hal_posix_tty_sio_c, ip);
 
-  return __ptty_read(self, bp, n);
+  msg_t msg;
+
+  return __ptty_read(self, bp, n, &msg);
 }
 
 /**
@@ -794,12 +960,13 @@ static int __ptty_tty_put_impl(void *ip, uint8_t b) {
 static int __ptty_tty_get_impl(void *ip) {
   hal_posix_tty_sio_c *self = oopIfGetOwner(hal_posix_tty_sio_c, ip);
   uint8_t b;
+  msg_t msg;
 
-  if (__ptty_read(self, &b, 1U) == 1U) {
+  if (__ptty_read(self, &b, 1U, &msg) == 1U) {
     return (int)b;
   }
 
-  return STM_RESET;
+  return msg == MSG_TIMEOUT ? STM_TIMEOUT : STM_RESET;
 }
 
 /**
@@ -1093,14 +1260,14 @@ void *__ptty_objinit_impl(void *ip, const void *vmt, hal_sio_driver_c *siop) {
   oqObjectInit(&self->oqueue, self->obuffer, sizeof self->obuffer,
                __ptty_onotify, self);
   qObjectInit(&self->equeue, self->ebuffer, sizeof self->ebuffer);
+  chThdQueueObjectInit(&self->drainsync);
   self->siop           = siop;
-  self->drainsync      = NULL;
   self->signals        = PTTY_SIGNAL_NONE;
   self->output_stopped = false;
   self->drain_waiting  = false;
   self->flow_pending   = false;
   self->flow_char      = 0U;
-  __ptty_attributes_default(&self->attributes);
+  __ptty_attributes_default(self);
   self->winsize.ws_row    = PTTY_DEFAULT_ROWS;
   self->winsize.ws_col    = PTTY_DEFAULT_COLUMNS;
   self->winsize.ws_xpixel = 0U;
@@ -1146,12 +1313,11 @@ msg_t __ptty_start_impl(void *ip, const void *config) {
   __ptty_input_reset_i(self);
   oqResetI(&self->oqueue);
   qResetI(&self->equeue);
+  __ptty_reset_drain_i(self);
   self->config         = self->siop->config;
   self->signals        = PTTY_SIGNAL_NONE;
   self->output_stopped = false;
-  self->drain_waiting  = false;
   self->flow_pending   = false;
-  self->drainsync      = NULL;
   drvSetArgumentX(self->siop, self);
   drvSetCallbackX(self->siop, __ptty_sio_cb);
   sioWriteEnableFlagsX(self->siop,
@@ -1179,10 +1345,7 @@ void __ptty_stop_impl(void *ip) {
   __ptty_input_reset_i(self);
   oqResetI(&self->oqueue);
   qResetI(&self->equeue);
-  if (self->drain_waiting) {
-    self->drain_waiting = false;
-    chThdResumeI(&self->drainsync, MSG_RESET);
-  }
+  __ptty_reset_drain_i(self);
   self->signals        = PTTY_SIGNAL_NONE;
   self->output_stopped = false;
   self->flow_pending   = false;
@@ -1268,10 +1431,7 @@ msg_t pttyReset(void *ip) {
   __ptty_input_reset_i(self);
   oqResetI(&self->oqueue);
   qResetI(&self->equeue);
-  if (self->drain_waiting) {
-    self->drain_waiting = false;
-    chThdResumeI(&self->drainsync, MSG_RESET);
-  }
+  __ptty_reset_drain_i(self);
   while (!sioIsRXEmptyX(self->siop)) {
     (void)sioGetX(self->siop);
   }
@@ -1282,7 +1442,7 @@ msg_t pttyReset(void *ip) {
   self->output_stopped = false;
   self->flow_pending   = false;
   self->flow_char      = 0U;
-  __ptty_attributes_default(&self->attributes);
+  __ptty_attributes_default(self);
   self->winsize.ws_row    = PTTY_DEFAULT_ROWS;
   self->winsize.ws_col    = PTTY_DEFAULT_COLUMNS;
   self->winsize.ws_xpixel = 0U;
