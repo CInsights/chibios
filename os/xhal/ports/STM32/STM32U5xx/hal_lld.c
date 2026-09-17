@@ -300,6 +300,13 @@ typedef struct {
   halfreq_t             flash_thresholds[STM32_WS_THRESHOLDS];
 } system_limits_t;
 
+#if defined(HAL_LLD_USE_CLOCK_RESUME)
+/**
+ * @brief   Last successfully installed clock configuration.
+ */
+static halclkcfg_t hal_clkcfg_current;
+#endif
+
 /**
  * @brief   Dynamic clock points for this device.
  * @note    Pre-initialized because clock_init() runs before DATA/BSS
@@ -1345,27 +1352,27 @@ static bool hal_lld_clock_check_retained(const halclkcfg_t *ccp) {
 }
 
 /**
- * @brief   Resumes a retained clock configuration after Stop 0, 1 or 2.
+ * @brief   Resumes the current clock configuration after Stop 0, 1 or 2.
  * @details Registers retained by Stop are validated and not rewritten. Only
  *          voltage scaling, stopped oscillators, the booster, the Stop-limited
  *          MSIS range, PLLs and the system clock source are restored.
  * @note    The caller must keep interrupts masked until this function returns.
- * @note    On failure the caller may use @p halClockSwitchMode() as a
- *          destructive fallback.
+ * @note    A failure may leave the clock state partially restored. The caller
+ *          must recover the clock state before interrupts are unmasked.
  *
- * @param[in] ccp       pointer to a @p halclkcfg_t structure
  * @return              The clock resume result.
  * @retval false        if the clock resume succeeded
  * @retval true         if the clock resume failed
  *
  * @notapi
  */
-bool hal_lld_clock_resume_mode(const halclkcfg_t *ccp) {
+bool hal_lld_clock_resume(void) {
   const uint32_t oscillator_enable_mask =
     RCC_CR_MSISON | RCC_CR_MSIKON | RCC_CR_HSION | RCC_CR_HSI48ON |
     RCC_CR_SHSION | RCC_CR_HSEON | RCC_CR_MSIKERON | RCC_CR_HSIKERON;
   const uint32_t pll_enable_mask =
     RCC_CR_PLL1ON | RCC_CR_PLL2ON | RCC_CR_PLL3ON;
+  const halclkcfg_t *ccp = &hal_clkcfg_current;
   uint32_t cr, wtmask, target_sws;
   halfreq_t hclk;
 
@@ -1532,6 +1539,12 @@ void hal_lld_init(void) {
      bootloader in case of NO_INIT.*/
   hal_lld_set_coreclock(STM32_HCLK_CLOCK);
 
+#if defined(HAL_LLD_USE_CLOCK_RESUME)
+  /* The default configuration is already active at this point and ordinary
+     runtime data has been initialized.*/
+  hal_clkcfg_current = hal_clkcfg_default;
+#endif
+
   /* NVIC initialization.*/
   nvicInit();
 
@@ -1650,6 +1663,11 @@ bool hal_lld_clock_switch_mode(const halclkcfg_t *ccp) {
 
   /* Updating the current system clock setting value.*/
   hal_lld_set_coreclock(hal_lld_get_clock_point(CLK_HCLK));
+
+#if defined(HAL_LLD_USE_CLOCK_RESUME)
+  /* Remember only a configuration which was installed successfully.*/
+  hal_clkcfg_current = *ccp;
+#endif
 
   return false;
 }

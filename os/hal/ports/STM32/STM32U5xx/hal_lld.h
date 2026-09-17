@@ -583,7 +583,7 @@ extern "C" {
   halfreq_t hal_lld_get_clock_point(halclkpt_t clkpt);
 #endif
 #if defined(HAL_LLD_USE_CLOCK_RESUME) || defined(__DOXYGEN__)
-  bool hal_lld_clock_resume_mode(const halclkcfg_t *ccp);
+  bool hal_lld_clock_resume(void);
 #endif
 #ifdef __cplusplus
 }
