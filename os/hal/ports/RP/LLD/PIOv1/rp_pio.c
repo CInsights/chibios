@@ -304,7 +304,9 @@ void pioInit(void) {
  *          vector from ISR context can make the PIO handler preempt
  *          itself while its interrupt is pending, see the RP2350
  *          datasheet section 3.8.6.1.4. Allocations that can raise the
- *          vector priority are expected from thread context.
+ *          vector priority are expected from thread context, debug
+ *          builds assert on such a raise from ISR context while the
+ *          calling core has state machines of the block allocated.
  *
  * @param[in] block     pointer to the PIO block descriptor
  * @param[in] smid      numeric identifier of a specific state machine or:
@@ -366,11 +368,17 @@ const rp_pio_sm_t *pioSmAllocI(const rp_pio_block_t *block,
          it is enabled. Re-enabling a live vector is safe because the PIO
          IRQ lines are level sensitive, a cleared pending state is latched
          again. On Hazard3, however, a raise from ISR context can make a
-         pending handler preempt itself, see the function notes.*/
+         pending handler preempt itself, debug builds assert against it,
+         see the function notes.*/
       if (SIO->CPUID == 0U) {
         /* State machine taken by core 0.*/
         if ((pio.blocks[b].c0_allocated_mask == 0U) ||
             (irq_priority < pio.blocks[b].c0_priority)) {
+#if defined(__riscv)
+          osalDbgAssert((pio.blocks[b].c0_allocated_mask == 0U) ||
+                        !port_is_isr_context(),
+                        "vector priority raised from ISR");
+#endif
           pio.blocks[b].c0_priority = irq_priority;
           switch (b) {
           case 0U:
@@ -394,6 +402,11 @@ const rp_pio_sm_t *pioSmAllocI(const rp_pio_block_t *block,
         /* State machine taken by core 1.*/
         if ((pio.blocks[b].c1_allocated_mask == 0U) ||
             (irq_priority < pio.blocks[b].c1_priority)) {
+#if defined(__riscv)
+          osalDbgAssert((pio.blocks[b].c1_allocated_mask == 0U) ||
+                        !port_is_isr_context(),
+                        "vector priority raised from ISR");
+#endif
           pio.blocks[b].c1_priority = irq_priority;
           switch (b) {
           case 0U:
