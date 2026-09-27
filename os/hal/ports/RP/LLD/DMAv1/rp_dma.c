@@ -230,7 +230,9 @@ void dmaInit(void) {
  *          vector from ISR context can make the DMA handler preempt
  *          itself while its interrupt is pending, see the RP2350
  *          datasheet section 3.8.6.1.4. Allocations that can raise the
- *          vector priority are expected from thread context.
+ *          vector priority are expected from thread context, debug
+ *          builds assert on such a raise from ISR context while the
+ *          calling core has channels allocated.
  *
  * @param[in] id        numeric identifiers of a specific channel or:
  *                      - @p RP_DMA_CHANNEL_ID_ANY for any channel.
@@ -287,10 +289,16 @@ const rp_dma_channel_t *dmaChannelAllocI(uint32_t id,
          Re-enabling a live vector is safe because the DMA IRQ lines are
          level sensitive, a cleared pending state is latched again. On
          Hazard3, however, a raise from ISR context can make a pending
-         handler preempt itself, see the function notes.*/
+         handler preempt itself, debug builds assert against it, see the
+         function notes.*/
       if (SIO->CPUID == 0U) {
         /* Channel taken by core 0.*/
         if ((dma.c0_allocated_mask == 0U) || (priority < dma.c0_priority)) {
+#if defined(__riscv)
+          osalDbgAssert((dma.c0_allocated_mask == 0U) ||
+                        !port_is_isr_context(),
+                        "vector priority raised from ISR");
+#endif
           dma.c0_priority = priority;
           nvicEnableVector(RP_DMA_IRQ_0_NUMBER, priority);
         }
@@ -299,6 +307,11 @@ const rp_dma_channel_t *dmaChannelAllocI(uint32_t id,
       else {
         /* Channel taken by core 1.*/
         if ((dma.c1_allocated_mask == 0U) || (priority < dma.c1_priority)) {
+#if defined(__riscv)
+          osalDbgAssert((dma.c1_allocated_mask == 0U) ||
+                        !port_is_isr_context(),
+                        "vector priority raised from ISR");
+#endif
           dma.c1_priority = priority;
           nvicEnableVector(RP_DMA_IRQ_1_NUMBER, priority);
         }
