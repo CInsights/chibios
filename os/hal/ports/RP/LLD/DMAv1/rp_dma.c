@@ -327,7 +327,8 @@ const rp_dma_channel_t *dmaChannelAllocI(uint32_t id,
 
 /**
  * @brief   Allocates a DMA channel.
- * @details The channel is allocated and, if required, the DMA clock enabled.
+ * @details The channel is allocated and, if required, the DMA block
+ *          released from reset.
  *          The function also enables the calling core DMA IRQ vector and
  *          raises its priority if @p priority is more urgent than the
  *          current one.
