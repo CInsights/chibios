@@ -391,6 +391,9 @@ void wspi_lld_send(hal_wspi_driver_c *wspip, const wspi_command_t *cmdp,
                  STM32_DMA3_CCR_ULEIE |
                  STM32_DMA3_CCR_DTEIE;
 
+  chDbgAssert((n > 0U) && (n <= STM32_DMA3_MAX_TRANSFER),
+              "invalid GPDMA transfer size");
+
   dma3ChannelSetSource(wspip->dmachp, txbuf);
   dma3ChannelSetDestination(wspip->dmachp, &wspip->ospi->DR);
   dma3ChannelSetTransactionSize(wspip->dmachp, n);
@@ -434,6 +437,9 @@ void wspi_lld_receive(hal_wspi_driver_c *wspip, const wspi_command_t *cmdp,
                  STM32_DMA3_CCR_USEIE |
                  STM32_DMA3_CCR_ULEIE |
                  STM32_DMA3_CCR_DTEIE;
+
+  chDbgAssert((n > 0U) && (n <= STM32_DMA3_MAX_TRANSFER),
+              "invalid GPDMA transfer size");
 
   dma3ChannelSetSource(wspip->dmachp, &wspip->ospi->DR);
   dma3ChannelSetDestination(wspip->dmachp, rxbuf);
