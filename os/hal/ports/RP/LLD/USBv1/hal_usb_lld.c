@@ -480,10 +480,15 @@ static void usb_serve_endpoint(USBDriver *usbp, usbep_t ep, bool is_in) {
 
     /* The programmed buffer length is already the smaller of the remaining
        transfer size and the endpoint packet size, so a longer reported
-       length would be a hardware anomaly. Clamping it keeps the copy
-       inside the user buffer and the remaining size from underflowing. */
+       length would be a hardware anomaly. Clamping it to both bounds the
+       copy by the programmed length: it stays inside the endpoint DPRAM
+       buffer and the user buffer, and the remaining size cannot
+       underflow. */
     if (n > oesp->rxsize) {
       n = oesp->rxsize;
+    }
+    if (n > epcp->out_maxsize) {
+      n = epcp->out_maxsize;
     }
 
     /* Copy received data into user buffer */
