@@ -341,8 +341,6 @@ void wspi_lld_serve_interrupt(hal_wspi_driver_c *wspip) {
     return;
   }
 
-  _wspi_isr_complete_code(wspip);
-
   while (data_transfer && (wspip->dmachp != NULL) &&
          (dma3ChannelGetTransactionSize(wspip->dmachp) > 0U)) {
   }
@@ -350,6 +348,9 @@ void wspi_lld_serve_interrupt(hal_wspi_driver_c *wspip) {
   if (data_transfer && (wspip->dmachp != NULL)) {
     (void)dma3ChannelDisable(wspip->dmachp);
   }
+
+  /* Notify completion only after DMA cleanup.*/
+  _wspi_isr_complete_code(wspip);
 }
 
 /**

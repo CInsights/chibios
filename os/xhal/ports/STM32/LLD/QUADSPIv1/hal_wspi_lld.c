@@ -231,8 +231,6 @@ void wspi_lld_serve_interrupt(hal_wspi_driver_c *wspip) {
   wspip->qspi->FCR = QUADSPI_FCR_CTEF | QUADSPI_FCR_CTCF |
                      QUADSPI_FCR_CSMF | QUADSPI_FCR_CTOF;
 
-  _wspi_isr_complete_code(wspip);
-
   while ((wspip->dma != NULL) &&
          (dmaStreamGetTransactionSize(wspip->dma) > 0U)) {
   }
@@ -252,6 +250,9 @@ void wspi_lld_serve_interrupt(hal_wspi_driver_c *wspip) {
 #else
   (void)was_receive;
 #endif
+
+  /* Notify completion only after DMA and peripheral cleanup.*/
+  _wspi_isr_complete_code(wspip);
 }
 
 /**
