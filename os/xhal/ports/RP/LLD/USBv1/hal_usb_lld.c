@@ -44,6 +44,17 @@
  */
 #define BUF_CTRL(ep)      (USB_DPSRAM->BUFCTRL[ep])
 
+/**
+ * @brief   No operation instruction of the buffer control publish delay.
+ * @note    The 32-bit encoding is used on ARMv8-M Mainline (RP2350
+ *          Cortex-M33), see @p usb_buffer_control_publish().
+ */
+#if defined(__ARM_ARCH_8M_MAIN__) || defined(__DOXYGEN__)
+#define USB_PUBLISH_NOP   "nop.w\n\t"
+#else
+#define USB_PUBLISH_NOP   "nop\n\t"
+#endif
+
 /*===========================================================================*/
 /* Driver exported variables.                                                */
 /*===========================================================================*/
@@ -144,12 +155,19 @@ static inline void usb_dpram_memcpy(void *dst, const void *src, size_t n) {
  *          shifted left by 16) and both buffers armed by one word.
  * @note    The delay is a fixed sequence of twelve no operation
  *          instructions, the budget used by the vendor reference
- *          implementation. Twelve processor cycles exceed one 48 MHz USB
- *          clock period for any system clock below 576 MHz (48 MHz * 12),
- *          far above the fastest system clock supported by either device.
- *          A fixed instruction sequence is used rather than a cycle
- *          counter because ARMv6-M (RP2040) has none, and it is equally
- *          valid on ARMv8-M and on the RISC-V core of the RP2350.
+ *          implementation, lasting at least twelve processor cycles on
+ *          every core. The RP2040 Cortex-M0+ and the RP2350 Hazard3 cores
+ *          execute each NOP in one cycle. The RP2350 Cortex-M33 folds a
+ *          NOP with a preceding 16-bit instruction, twelve 16-bit NOPs
+ *          would execute in pairs in about six cycles, so the 32-bit
+ *          encoding is used there: a 32-bit NOP following the barrier or
+ *          another 32-bit NOP is not folded and takes one cycle. Twelve
+ *          processor cycles cover one 48 MHz USB clock period for any
+ *          system clock up to 576 MHz (48 MHz * 12), well above the RP2350
+ *          overclocking bound of 300 MHz and any RP2040 system clock, six
+ *          cycles would only cover it up to 288 MHz. A fixed instruction
+ *          sequence is used rather than a cycle counter because ARMv6-M
+ *          (RP2040) has none.
  *
  * @param[out] bcp      pointer to the buffer control register
  * @param[in] buf_ctrl  buffer control word to be published
@@ -167,9 +185,10 @@ static void usb_buffer_control_publish(volatile uint32_t *bcp,
     __DSB();
 
     /* Separation of the two writes, see the note above. */
-    __asm__ volatile ("nop\n\tnop\n\tnop\n\tnop\n\t"
-                      "nop\n\tnop\n\tnop\n\tnop\n\t"
-                      "nop\n\tnop\n\tnop\n\tnop"
+    __asm__ volatile (USB_PUBLISH_NOP USB_PUBLISH_NOP USB_PUBLISH_NOP
+                      USB_PUBLISH_NOP USB_PUBLISH_NOP USB_PUBLISH_NOP
+                      USB_PUBLISH_NOP USB_PUBLISH_NOP USB_PUBLISH_NOP
+                      USB_PUBLISH_NOP USB_PUBLISH_NOP USB_PUBLISH_NOP
                       : : : "memory");
   }
 
