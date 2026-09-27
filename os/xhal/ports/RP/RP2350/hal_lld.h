@@ -83,6 +83,10 @@
  *          API (@p halClockSwitchMode()) and clock point queries become
  *          dynamic. When @p FALSE (default) the clock tree is fixed at
  *          initialization time and this feature costs nothing.
+ * @note    Supported on the Arm Cortex-M33 cores only, the switch
+ *          sequence masks interrupts through the Cortex-M PRIMASK
+ *          register. RISC-V (Hazard3) builds reject @p TRUE at
+ *          compile time.
  */
 #if !defined(RP_CLOCK_DYNAMIC) || defined(__DOXYGEN__)
 #define RP_CLOCK_DYNAMIC                    FALSE
@@ -244,6 +248,14 @@
  */
 #if ((RP_CLK_SYS_FREQ) * 10U) < ((RP_CLK_USB_FREQ) * 11U)
 #error "RP2350-E12: clk_sys must be at least 1.1 * clk_usb for reliable USB operation"
+#endif
+
+/*
+ * The runtime clock switch masks interrupts through the Cortex-M
+ * PRIMASK register, there is no Hazard3 implementation.
+ */
+#if (RP_CLOCK_DYNAMIC == TRUE) && defined(__riscv)
+#error "RP_CLOCK_DYNAMIC is not supported on the RISC-V (Hazard3) cores"
 #endif
 
 #if (RP_CLOCK_DYNAMIC == TRUE) && defined(CH_CFG_ST_TIMEDELTA) &&           \
