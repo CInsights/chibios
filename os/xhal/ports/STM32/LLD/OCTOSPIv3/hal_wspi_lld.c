@@ -401,7 +401,8 @@ void wspi_lld_send(hal_wspi_driver_c *wspip, const wspi_command_t *cmdp,
                      STM32_DMA3_CTR1_SAP_MEM |
                      STM32_DMA3_CTR1_SINC |
                      STM32_DMA3_CTR1_SDW_BYTE,
-                     STM32_DMA3_CTR2_REQSEL(wspip->dreq),
+                     STM32_DMA3_CTR2_REQSEL(wspip->dreq) |
+                     STM32_DMA3_CTR2_DREQ,
                      0U);
 
   wspip->ospi->CR &= ~OCTOSPI_CR_FMODE;
