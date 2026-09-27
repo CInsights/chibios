@@ -416,6 +416,7 @@ static void usb_prepare_in_ep(hal_usb_driver_c *usbp, usbep_t ep) {
   uint32_t buf_ctrl;
   uint32_t ep_ctrl;
   USBInEndpointState *iesp = usbp->epc[ep]->in_state;
+  rp_usb_ep_side_t *iepd = &usbp->epd[ep].in;
 
   if (ep == 0) {
     ep_ctrl = USB->SIECTRL;
@@ -430,6 +431,16 @@ static void usb_prepare_in_ep(hal_usb_driver_c *usbp, usbep_t ep) {
   /* The txsize - txlast difference is the size not yet in the buffer */
   if (iesp->txsize - iesp->txlast > 0) {
     buf_ctrl |= usb_prepare_in_ep_buffer(usbp, ep, 1);
+  }
+
+  /* An isochronous buffer 1 lies at the offset encoded in bits 27:28, in
+     the buffer 1 half of the word, which must match the buf_size used to
+     place the copy. The controller writes that half back with everything
+     but length, PID and LAST cleared, so the offset is encoded again on
+     every arm rather than preserved.*/
+  if ((usbp->epc[ep]->ep_mode & USB_EP_MODE_TYPE) == USB_EP_MODE_TYPE_ISOC) {
+    buf_ctrl |= (uint32_t)usb_isochronous_buffer_mode(iepd->buf_size) <<
+                USB_BUFFER_DOUBLE_BUFFER_OFFSET_Pos;
   }
 
   if (buf_ctrl & USB_BUFFER_BUFFER1_AVAILABLE) {

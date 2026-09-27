@@ -415,6 +415,16 @@ static void usb_prepare_in_ep(USBDriver *usbp, usbep_t ep) {
     buf_ctrl |= usb_prepare_in_ep_buffer(usbp, ep, 1);
   }
 
+  /* An isochronous buffer 1 lies at the offset encoded in bits 27:28, in
+     the buffer 1 half of the word, which must match the buf_size used to
+     place the copy. The controller writes that half back with everything
+     but length, PID and LAST cleared, so the offset is encoded again on
+     every arm rather than preserved.*/
+  if ((usbp->epc[ep]->ep_mode & USB_EP_MODE_TYPE) == USB_EP_MODE_TYPE_ISOC) {
+    buf_ctrl |= (uint32_t)usb_isochronous_buffer_mode(iesp->buf_size) <<
+                USB_BUFFER_DOUBLE_BUFFER_OFFSET_Pos;
+  }
+
   if (buf_ctrl & USB_BUFFER_BUFFER1_AVAILABLE) {
     /* Double buffered */
     ep_ctrl &= ~USB_EP_BUFFER_IRQ_EN;
