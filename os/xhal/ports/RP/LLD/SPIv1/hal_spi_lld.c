@@ -57,7 +57,11 @@ SPIDriver SPID1;
  */
 static const hal_spi_config_t spi_default_config = SPI_DEFAULT_CONFIGURATION;
 
-static const uint16_t dummytx = 0xFFFFU;
+/* Deliberately not const: the TX DMA reads this word once per frame during
+   ignore and receive operations, keeping it in RAM avoids DMA fetches
+   through XIP, which is unavailable while the flash is erased or
+   programmed.*/
+static uint16_t dummytx = 0xFFFFU;
 static uint16_t dummyrx;
 
 /*===========================================================================*/
