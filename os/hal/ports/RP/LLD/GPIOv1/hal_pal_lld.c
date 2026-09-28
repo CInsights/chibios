@@ -282,7 +282,7 @@ void _pal_lld_disablelineevent(ioline_t line) {
 
 /**
  * @brief Force a trigger event on the line.
- * 
+ *
  * @param[in]         line identifier
  */
 void _pal_lld_forcelineevent(ioline_t line) {
@@ -292,14 +292,15 @@ void _pal_lld_forcelineevent(ioline_t line) {
   uint32_t force_mask = IO_BANK0->PROC[RP_PAL_EVENT_CORE_AFFINITY].INTE[reg] &
                         RP_PAL_LINE_MASK(line);
 
-  /* Clear then set only the target bits, without an RMW race on sibling bits. */
+  /* Clear then set only the target bits, without an RMW race on sibling
+     bits.*/
   rp_pal_reg_clr(intf, force_mask);
   rp_pal_reg_set(intf, force_mask);
 }
 
 /**
  * @brief Clear all forced trigger event on the line.
- * 
+ *
  * @param[in]         line identifier
  */
 void _pal_lld_unforcelineevent(ioline_t line) {
