@@ -276,6 +276,12 @@ void spi_lld_stop(SPIDriver *spip) {
 
   if (spip->state == SPI_READY) {
 
+    /* DMA interrupts disabled on both cores first, the stop can be
+       performed by the core that did not start the driver and a
+       cross-core channel free requires the enables to be clear.*/
+    dmaChannelDisableInterruptX(spip->dmarx);
+    dmaChannelDisableInterruptX(spip->dmatx);
+
     /* SPI disables.*/
     spip->spi->SSPCR1  = 0U;
     dmaChannelFreeI(spip->dmarx);
