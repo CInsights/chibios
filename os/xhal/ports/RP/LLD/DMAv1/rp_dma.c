@@ -112,6 +112,8 @@ static struct {
 
 static void serve_interrupt(const rp_dma_channel_t *dmachp) {
   uint32_t ct;
+  rp_dmaisr_t func;
+  void *param;
 
   /* Get channel control, disable then clear any bus error flags.*/
   ct = dmachp->channel->CTRL_TRIG;
@@ -121,9 +123,20 @@ static void serve_interrupt(const rp_dma_channel_t *dmachp) {
   dmachp->channel->CTRL_TRIG = DMA_CTRL_TRIG_READ_ERROR |
                                DMA_CTRL_TRIG_WRITE_ERROR;
 
+  /* The handler can be removed or replaced concurrently by the other
+     core, the function and its parameter are sampled together, once,
+     under the system lock so that they come from the same allocation.
+     The handler is then invoked outside the lock, so a channel freed by
+     the other core after the sampling still gets its previous handler
+     invoked, see the cross-core notes in dmaChannelFreeI().*/
+  chSysLockFromISR();
+  func  = dma.channels[dmachp->chnidx].func;
+  param = dma.channels[dmachp->chnidx].param;
+  chSysUnlockFromISR();
+
   /* Calling the associated function, if defined.*/
-  if (dma.channels[dmachp->chnidx].func != NULL) {
-    dma.channels[dmachp->chnidx].func(dma.channels[dmachp->chnidx].param, ct);
+  if (func != NULL) {
+    func(param, ct);
   }
 }
 
