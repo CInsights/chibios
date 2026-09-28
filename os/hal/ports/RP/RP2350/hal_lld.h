@@ -347,6 +347,11 @@ typedef struct {
    *          lowered after a downward one. Values above 1300 mV are
    *          not supported (they require the POWMAN voltage-limit
    *          unlock, deliberately out of scope).
+   * @note    Lowering the voltage after a downward switch is best
+   *          effort: the frequency has already changed, so a regulator
+   *          update timeout there is not reported. A timeout while
+   *          raising the voltage fails the switch with the clocks
+   *          untouched.
    */
   uint32_t          vreg_mv;
 } halclkcfg_t;
