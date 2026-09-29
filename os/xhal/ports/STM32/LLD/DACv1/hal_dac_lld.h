@@ -635,11 +635,18 @@ extern "C" {
                             dacsample_t sample);
   msg_t dac_lld_start_conversion(DACDriver *dacp);
   void dac_lld_stop_conversion(DACDriver *dacp);
-  void dac_lld_serve_interrupt(DACDriver *dacp);
+#if STM32_DAC_USE_DAC1_CH1 || STM32_DAC_USE_DAC1_CH2 || defined(__DOXYGEN__)
   void dac_lld_serve_interrupt_dac1(void);
+#endif
+#if STM32_DAC_USE_DAC2_CH1 || STM32_DAC_USE_DAC2_CH2 || defined(__DOXYGEN__)
   void dac_lld_serve_interrupt_dac2(void);
+#endif
+#if STM32_DAC_USE_DAC3_CH1 || STM32_DAC_USE_DAC3_CH2 || defined(__DOXYGEN__)
   void dac_lld_serve_interrupt_dac3(void);
+#endif
+#if STM32_DAC_USE_DAC4_CH1 || STM32_DAC_USE_DAC4_CH2 || defined(__DOXYGEN__)
   void dac_lld_serve_interrupt_dac4(void);
+#endif
 #ifdef __cplusplus
 }
 #endif

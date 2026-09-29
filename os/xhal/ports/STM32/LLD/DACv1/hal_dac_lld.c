@@ -958,7 +958,7 @@ void dac_lld_stop_conversion(DACDriver *dacp) {
  *
  * @isr
  */
-void dac_lld_serve_interrupt(DACDriver *dacp) {
+static void dac_lld_serve_interrupt(DACDriver *dacp) {
 
   /* Check for DMA underrun while a stream is active.*/
   if (dacp->grpp != NULL) {
@@ -968,39 +968,65 @@ void dac_lld_serve_interrupt(DACDriver *dacp) {
   }
 }
 
+#if STM32_DAC_USE_DAC1_CH1 || STM32_DAC_USE_DAC1_CH2 || defined(__DOXYGEN__)
 /**
  * @brief   DAC1 IRQ service routine.
  *
  * @isr
  */
 void dac_lld_serve_interrupt_dac1(void) {
-#if STM32_DAC_USE_DAC1_CH1 || STM32_DAC_USE_DAC1_CH2
-  uint32_t isr;
-
-  isr = DAC1->SR;
-  DAC1->SR = isr;
-
+  uint32_t isr, flags, pending;
 #if STM32_DAC_USE_DAC1_CH1
-  if ((isr & DAC_SR_DMAUDR1) != 0U) {
+  uint32_t sequence1;
+#endif
+#if !STM32_DAC_DUAL_MODE && STM32_DAC_USE_DAC1_CH2
+  uint32_t sequence2;
+#endif
+
+  /* Snapshot enables and conversion identities before any hook/callback.*/
+  isr = DAC1->SR;
+  flags = isr & DAC_SR_DMAUDR1;
+#if STM32_HAS_DAC1_CH2
+  flags |= isr & DAC_SR_DMAUDR2;
+#endif
+  pending = flags & DAC1->CR;
+#if STM32_DAC_USE_DAC1_CH1
+  sequence1 = DACD1.sequence;
+#endif
+#if !STM32_DAC_DUAL_MODE && STM32_DAC_USE_DAC1_CH2
+  sequence2 = DACD2.sequence;
+#endif
+
+  /* Acknowledge only captured W1C flags, including masked underruns as
+     before. Preserve the raw status argument seen by the optional hook.*/
+  DAC1->SR = flags;
+
+#if defined(STM32_DAC_DAC1_IRQ_HOOK)
+  STM32_DAC_DAC1_IRQ_HOOK(isr);
+#endif
+
+  /* The hook or preceding channel callback may have restarted a conversion.*/
+#if STM32_DAC_USE_DAC1_CH1
+  if (((pending & DAC_SR_DMAUDR1) != 0U) && (DACD1.sequence == sequence1)) {
     dac_lld_serve_interrupt(&DACD1);
   }
 #endif
 
 #if !STM32_DAC_DUAL_MODE && STM32_DAC_USE_DAC1_CH2
-  if ((isr & DAC_SR_DMAUDR2) != 0U) {
+  if (((pending & DAC_SR_DMAUDR2) != 0U) && (DACD2.sequence == sequence2)) {
     dac_lld_serve_interrupt(&DACD2);
   }
 #endif
-#endif
 }
+#endif
 
+#if STM32_DAC_USE_DAC2_CH1 || STM32_DAC_USE_DAC2_CH2 || defined(__DOXYGEN__)
 /**
  * @brief   DAC2 IRQ service routine.
  *
  * @isr
  */
 void dac_lld_serve_interrupt_dac2(void) {
-#if STM32_DAC_USE_DAC2_CH1 || STM32_DAC_USE_DAC2_CH2
   uint32_t isr;
 
   isr = DAC2->SR;
@@ -1017,16 +1043,16 @@ void dac_lld_serve_interrupt_dac2(void) {
     dac_lld_serve_interrupt(&DACD4);
   }
 #endif
-#endif
 }
+#endif
 
+#if STM32_DAC_USE_DAC3_CH1 || STM32_DAC_USE_DAC3_CH2 || defined(__DOXYGEN__)
 /**
  * @brief   DAC3 IRQ service routine.
  *
  * @isr
  */
 void dac_lld_serve_interrupt_dac3(void) {
-#if STM32_DAC_USE_DAC3_CH1 || STM32_DAC_USE_DAC3_CH2
   uint32_t isr;
 
   isr = DAC3->SR;
@@ -1043,16 +1069,16 @@ void dac_lld_serve_interrupt_dac3(void) {
     dac_lld_serve_interrupt(&DACD6);
   }
 #endif
-#endif
 }
+#endif
 
+#if STM32_DAC_USE_DAC4_CH1 || STM32_DAC_USE_DAC4_CH2 || defined(__DOXYGEN__)
 /**
  * @brief   DAC4 IRQ service routine.
  *
  * @isr
  */
 void dac_lld_serve_interrupt_dac4(void) {
-#if STM32_DAC_USE_DAC4_CH1 || STM32_DAC_USE_DAC4_CH2
   uint32_t isr;
 
   isr = DAC4->SR;
@@ -1069,8 +1095,8 @@ void dac_lld_serve_interrupt_dac4(void) {
     dac_lld_serve_interrupt(&DACD8);
   }
 #endif
-#endif
 }
+#endif
 
 #endif /* HAL_USE_DAC */
 
