@@ -312,15 +312,16 @@ static bool is_dual_mode(const DACDriver *dacp) {
  *          double DMA mode is enabled.
  *
  * @param[in] dacp      pointer to the @p DACDriver object
+ * @param[in] cfg       configuration selecting the data format
  * @param[in] channel   DAC channel number
  * @param[in] value     value to be output to the DAC holding register
  *
  * @notapi
  */
 static msg_t put_channel(DACDriver *dacp,
+                         const DACConfig *cfg,
                          dacchannel_t channel,
                          uint32_t value) {
-  const DACConfig *cfg = (const DACConfig *)dacp->config;
 
   switch (cfg->datamode) {
     case DAC_DHRM_12BIT_RIGHT:
@@ -381,6 +382,72 @@ static msg_t put_channel(DACDriver *dacp,
       return HAL_RET_CONFIG_ERROR;
   }
   return HAL_RET_SUCCESS;
+}
+
+/**
+ * @brief   Applies a configuration to the owned DAC channels.
+ * @note    The peripheral clock must already be enabled. DMA resources and
+ *          the other independent channel are left unchanged.
+ */
+static void apply_config(DACDriver *dacp, const DACConfig *cfg) {
+  uint32_t reg;
+
+  /* Disable before changing modes or initial values. Clear CEN separately,
+     with EN already clear, because calibration writes require EN = 0.*/
+#if STM32_DAC_DUAL_MODE == FALSE
+  dacp->params->dac->CR &= ~((DAC_CR_EN1 | DAC_CR_DMAEN1 | DAC_CR_DMAUDRIE1) <<
+                            dacp->params->regshift);
+  while ((dacp->params->dac->SR &
+          (DAC_SR_DAC1RDY << dacp->params->regshift)) != 0U);
+  dacp->params->dac->CR &= dacp->params->regmask;
+
+  /* The low halfword configures either independent channel. HFSEL is
+     shared and derived from the DAC clock, not the configuration.*/
+  reg = dacp->params->dac->MCR & dacp->params->regmask;
+  reg &= ~(DAC_MCR_HFSEL_0 | DAC_MCR_HFSEL_1);
+  if (STM32_ADCDACCLK > HF_SEL_AHB_GT_160MHZ) {
+    reg |= DAC_MCR_HFSEL_1;
+  }
+  else if (STM32_ADCDACCLK > HF_SEL_AHB_GT_80MHZ) {
+    reg |= DAC_MCR_HFSEL_0;
+  }
+  reg |= (cfg->mcr & CONFIG_SINGLE_MCR_MASK) << dacp->params->regshift;
+  reg &= ~(DAC_MCR_DMADOUBLE1 << dacp->params->regshift);
+  dacp->params->dac->MCR = reg;
+
+  /* Preload DOR, not the double-DMA pair, before enabling the channel.
+     No writes are allowed during the EN-to-RDY startup interval.*/
+  reg = dacp->params->dac->CR & dacp->params->regmask;
+  reg |= (cfg->cr & CONFIG_SINGLE_CR_MASK) << dacp->params->regshift;
+  dacp->params->dac->CR = reg;
+  (void)put_channel(dacp, cfg, 0U, (dacsample_t)cfg->init);
+  dacp->params->dac->CR = reg | (DAC_CR_EN1 << dacp->params->regshift);
+#else
+  dacp->params->dac->CR &= ~(DAC_CR_EN1 | DAC_CR_DMAEN1 | DAC_CR_DMAUDRIE1 |
+                            DAC_CR_EN2 | DAC_CR_DMAEN2 | DAC_CR_DMAUDRIE2);
+  while ((dacp->params->dac->SR & (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY)) != 0U);
+  dacp->params->dac->CR = 0U;
+
+  /* A dual driver owns both channels, even with a single-channel format.*/
+  reg = cfg->mcr & ~(DAC_MCR_HFSEL_0 | DAC_MCR_HFSEL_1);
+  if (STM32_ADCDACCLK > HF_SEL_AHB_GT_160MHZ) {
+    reg |= DAC_MCR_HFSEL_1;
+  }
+  else if (STM32_ADCDACCLK > HF_SEL_AHB_GT_80MHZ) {
+    reg |= DAC_MCR_HFSEL_0;
+  }
+  reg &= ~(DAC_MCR_DMADOUBLE1 | DAC_MCR_DMADOUBLE2);
+  dacp->params->dac->MCR = reg;
+
+  /* Preload both channels without DMA requests or underrun interrupts.*/
+  reg = cfg->cr & ~(DAC_CR_EN1 | DAC_CR_EN2 | DAC_CR_DMAEN1 | DAC_CR_DMAEN2 |
+                    DAC_CR_DMAUDRIE1 | DAC_CR_DMAUDRIE2);
+  dacp->params->dac->CR = reg;
+  (void)put_channel(dacp, cfg, 0U, (dacsample_t)cfg->init);
+  (void)put_channel(dacp, cfg, 1U,
+                    (dacsample_t)(cfg->init >> CHANNEL_REGISTER_SHIFT));
+  dacp->params->dac->CR = reg | DAC_CR_EN1 | DAC_CR_EN2;
+#endif
 }
 
 /*===========================================================================*/
@@ -491,23 +558,41 @@ void dac_lld_init(void) {
 }
 
 const DACConfig *dac_lld_setcfg(DACDriver *dacp, const DACConfig *config) {
-  (void)dacp;
 
   if (config == NULL) {
-    return dac_lld_selcfg(dacp, 0U);
+    config = &default_config;
+  }
+
+  /* Reject unsupported data formats before changing hardware or the current
+     configuration. During STARTING, hardware is still clock-gated.*/
+  switch (config->datamode) {
+  case DAC_DHRM_12BIT_RIGHT:
+  case DAC_DHRM_12BIT_LEFT:
+  case DAC_DHRM_8BIT_RIGHT:
+#if STM32_DAC_DUAL_MODE
+  case DAC_DHRM_12BIT_RIGHT_DUAL:
+  case DAC_DHRM_12BIT_LEFT_DUAL:
+  case DAC_DHRM_8BIT_RIGHT_DUAL:
+#endif
+    break;
+  default:
+    return NULL;
+  }
+
+  if (dacp->state == HAL_DRV_STATE_READY) {
+    apply_config(dacp, config);
   }
 
   return config;
 }
 
 const DACConfig *dac_lld_selcfg(DACDriver *dacp, unsigned cfgnum) {
-  (void)dacp;
 
   if (cfgnum != 0U) {
     return NULL;
   }
 
-  return &default_config;
+  return dac_lld_setcfg(dacp, &default_config);
 }
 
 void dac_lld_set_callback(DACDriver *dacp, drv_cb_t cb) {
@@ -535,131 +620,65 @@ msg_t dac_lld_start(DACDriver *dacp) {
 
   dacp->config = cfg;
 
-  /* Performing full initialization.*/
-  {
-    dacchannel_t channel = 0;
-    uint32_t reg;
+  /* Enable DAC clock. DMA channel allocation is deferred to conversion
+     start and only allocated if a group conversion is used.*/
 
-    /* Enable DAC clock. DMA channel allocation is deferred to conversion
-       start and only allocated if a group conversion is used.*/
-
-    if (false) {
-    }
+  if (false) {
+  }
 #if STM32_DAC_USE_DAC1_CH1
-    else if (&DACD1 == dacp) {
-      rccEnableDAC1(true);
-    }
+  else if (&DACD1 == dacp) {
+    rccEnableDAC1(true);
+  }
 #endif
 
 #if STM32_DAC_USE_DAC1_CH2
-    else if (&DACD2 == dacp) {
-      rccEnableDAC1(true);
-      channel = 1;
-    }
+  else if (&DACD2 == dacp) {
+    rccEnableDAC1(true);
+  }
 #endif
 
 #if STM32_DAC_USE_DAC2_CH1
-    else if (&DACD3 == dacp) {
-      rccEnableDAC2(true);
-    }
+  else if (&DACD3 == dacp) {
+    rccEnableDAC2(true);
+  }
 #endif
 
 #if STM32_DAC_USE_DAC2_CH2
-    else if (&DACD4 == dacp) {
-      rccEnableDAC2(true);
-      channel = 1;
-    }
+  else if (&DACD4 == dacp) {
+    rccEnableDAC2(true);
+  }
 #endif
 
 #if STM32_DAC_USE_DAC3_CH1
-    else if (&DACD5 == dacp) {
-      rccEnableDAC3(true);
-    }
+  else if (&DACD5 == dacp) {
+    rccEnableDAC3(true);
+  }
 #endif
 
 #if STM32_DAC_USE_DAC3_CH2
-    else if (&DACD6 == dacp) {
-      rccEnableDAC3(true);
-      channel = 1;
-    }
+  else if (&DACD6 == dacp) {
+    rccEnableDAC3(true);
+  }
 #endif
 
 #if STM32_DAC_USE_DAC4_CH1
-    else if (&DACD7 == dacp) {
-      rccEnableDAC4(true);
-    }
+  else if (&DACD7 == dacp) {
+    rccEnableDAC4(true);
+  }
 #endif
 
 #if STM32_DAC_USE_DAC4_CH2
-    else if (&DACD8 == dacp) {
-      rccEnableDAC4(true);
-      channel = 1;
-    }
+  else if (&DACD8 == dacp) {
+    rccEnableDAC4(true);
+  }
 #endif
 
-    else {
-      chDbgAssert(false, "unknown DAC instance");
-      return HAL_RET_NO_RESOURCE;
-    }
-
-#if STM32_DAC_DUAL_MODE == FALSE
-    /* Operating in SINGLE mode. Setup registers for specified channel from
-       configuration. Lower half word of configuration specifies configuration
-       for either channel 1 or 2.*/
-    reg = (dacp->params->dac->MCR & dacp->params->regmask);
-
-    /* Handle HFSEL setting based on DAC clock.*/
-    reg &= ~(DAC_MCR_HFSEL_0 | DAC_MCR_HFSEL_1);
-    if (STM32_ADCDACCLK > HF_SEL_AHB_GT_160MHZ) {
-      reg |= DAC_MCR_HFSEL_1;
-    }
-    else if (STM32_ADCDACCLK > HF_SEL_AHB_GT_80MHZ) {
-      reg |= DAC_MCR_HFSEL_0;
-    }
-
-    /* Disable double DMA setting so DOR is updated.*/
-    reg |= (cfg->mcr & CONFIG_SINGLE_MCR_MASK) << dacp->params->regshift;
-    reg &= ~(DAC_MCR_DMADOUBLE1 << dacp->params->regshift);
-    dacp->params->dac->MCR = reg;
-
-    /* Configure with channel and DMA disabled, then preload before enabling.
-       Writes are not allowed during the EN-to-RDY startup interval.*/
-    reg = dacp->params->dac->CR;
-    reg &= dacp->params->regmask;
-    reg |= (cfg->cr & CONFIG_SINGLE_CR_MASK) << dacp->params->regshift;
-    dacp->params->dac->CR = reg;
-    (void)put_channel(dacp, channel, (dacsample_t)cfg->init);
-    dacp->params->dac->CR = reg | (DAC_CR_EN1 << dacp->params->regshift);
-#else /* STM32_DAC_DUAL_MODE != FALSE */
-    /* Operating in DUAL mode with two channels to setup. Set registers for
-       both channels from configuration. Lower and upper half words specify
-       configuration for channels 1 & 2 respectively.*/
-    (void)channel;
-
-    /* Replace both channels' previous settings and derive HFSEL from clock.*/
-    reg = cfg->mcr & ~(DAC_MCR_HFSEL_0 | DAC_MCR_HFSEL_1);
-    if (STM32_ADCDACCLK > HF_SEL_AHB_GT_160MHZ) {
-      reg |= DAC_MCR_HFSEL_1;
-    }
-    else if (STM32_ADCDACCLK > HF_SEL_AHB_GT_80MHZ) {
-      reg |= DAC_MCR_HFSEL_0;
-    }
-
-    /* Initial values target DOR on both channels, not the double-DMA pair.*/
-    reg &= ~(DAC_MCR_DMADOUBLE1 | DAC_MCR_DMADOUBLE2);
-    dacp->params->dac->MCR = reg;
-
-    /* Preload both channels while disabled, without enabling DMA requests.*/
-    reg = cfg->cr;
-    reg &= ~(DAC_CR_EN1 | DAC_CR_EN2 | DAC_CR_DMAEN1 | DAC_CR_DMAEN2 |
-             DAC_CR_DMAUDRIE1 | DAC_CR_DMAUDRIE2);
-    dacp->params->dac->CR = reg;
-    (void)put_channel(dacp, 0U, (dacsample_t)cfg->init);
-    (void)put_channel(dacp, 1U, (dacsample_t)(cfg->init >>
-                                              CHANNEL_REGISTER_SHIFT));
-    dacp->params->dac->CR = reg | DAC_CR_EN1 | DAC_CR_EN2;
-#endif /* STM32_DAC_DUAL_MODE == FALSE */
+  else {
+    chDbgAssert(false, "unknown DAC instance");
+    return HAL_RET_NO_RESOURCE;
   }
+
+  apply_config(dacp, cfg);
   return HAL_RET_SUCCESS;
 }
 
@@ -809,7 +828,8 @@ msg_t dac_lld_put_channel(DACDriver *dacp,
     return HAL_RET_NO_RESOURCE;
   }
 
-  return put_channel(dacp, channel, (uint32_t)sample);
+  return put_channel(dacp, (const DACConfig *)dacp->config,
+                     channel, (uint32_t)sample);
 
 }
 
@@ -1091,7 +1111,7 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
 
   /* Set initial value of channel holding register(s).*/
   ch_num = dacp->params->regshift == 0 ? 0U : 1U;
-  (void) put_channel(dacp, ch_num, chx);
+  (void)put_channel(dacp, cfg, ch_num, chx);
 
   /* Enable DMA and trigger on the specified channel. Clear under-run status.*/
   cr &= dacp->params->regmask;
@@ -1126,9 +1146,9 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
   }
 
   /* Set initial value of DHR/DHRB register(s).*/
-  (void) put_channel(dacp, 0U, chx);
+  (void)put_channel(dacp, cfg, 0U, chx);
   if (dual) {
-    (void) put_channel(dacp, 1U, ch2);
+    (void)put_channel(dacp, cfg, 1U, ch2);
   }
 
   /* Replace CH1 trigger selection and preserve CH2's independent settings.

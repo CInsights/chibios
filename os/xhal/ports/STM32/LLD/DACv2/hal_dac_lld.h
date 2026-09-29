@@ -491,8 +491,13 @@ typedef enum {
  * @note    In DUAL mode init, cr and mcr (if available) fields hold CH1
  *          settings in their lower 16 bits and CH2 settings in the upper
  *          16 bits.
- * @note    At initial start, DMA requests and double DMA are disabled, and
- *          initial values are loaded before enabling the owned channels.
+ * @note    Initial start and READY reconfiguration disable DMA requests and
+ *          double DMA, and load initial values before enabling the owned
+ *          channels. Live reconfiguration briefly disables the owned channels,
+ *          preserves the other independent channel and does not change clock
+ *          or DMA resource ownership.
+ * @note    Unsupported data formats are rejected without changing hardware
+ *          or the current configuration.
  * @note    EN, DMAEN and DMAUDRIE are managed by the driver. Underrun IRQs
  *          are enabled only during conversions, using CH1 in dual mode.
  *          HFSEL is derived from the DAC clock; configuration values for
