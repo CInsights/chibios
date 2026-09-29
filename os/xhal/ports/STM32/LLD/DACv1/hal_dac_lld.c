@@ -732,7 +732,6 @@ msg_t dac_lld_put_channel(DACDriver *dacp,
 #endif
     break;
   default:
-    chDbgAssert(false, "unexpected DAC mode");
     return HAL_RET_CONFIG_ERROR;
   }
 
@@ -762,34 +761,19 @@ msg_t dac_lld_put_channel(DACDriver *dacp,
  */
 msg_t dac_lld_start_conversion(DACDriver *dacp) {
   const DACConfig *cfg = (const DACConfig *)dacp->config;
-  uint32_t n, cr, dmamode;
-
-  /* Identifies restarts from callbacks even when group/buffer are reused.*/
-  dacp->sequence++;
+  uint32_t n, cr, dmamode, nch;
+  volatile void *dacreg;
 
   /* Number of DMA operations per buffer.*/
   n = dacp->depth * dacp->grpp->num_channels;
-
-  /* Allocating the DMA channel.*/
-  dacp->dma = dmaStreamAllocI(dacp->params->dmastream,
-                              dacp->params->dmairqprio,
-                              (stm32_dmaisr_t)dac_lld_serve_tx_interrupt,
-                              (void *)dacp);
-  if (dacp->dma == NULL) {
-    return HAL_RET_NO_RESOURCE;
-  }
-#if STM32_DMA_SUPPORTS_DMAMUX
-  dmaSetRequestSource(dacp->dma, dacp->params->peripheral);
-#endif
 
   /* DMA settings depend on the chosen DAC mode.*/
   switch (cfg->datamode) {
   /* Sets the DAC data register */
   case DAC_DHRM_12BIT_RIGHT:
-    chDbgAssert(dacp->grpp->num_channels == 1, "invalid number of channels");
+    nch = 1U;
 
-    dmaStreamSetPeripheral(dacp->dma, &dacp->params->dac->DHR12R1 +
-                                      dacp->params->dataoffset);
+    dacreg = &dacp->params->dac->DHR12R1 + dacp->params->dataoffset;
     dmamode = dacp->params->dmamode |
 #if STM32_DMA_ADVANCED == FALSE
               STM32_DMA_CR_PSIZE_WORD  | STM32_DMA_CR_MSIZE_HWORD;
@@ -798,10 +782,9 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
 #endif
     break;
   case DAC_DHRM_12BIT_LEFT:
-    chDbgAssert(dacp->grpp->num_channels == 1, "invalid number of channels");
+    nch = 1U;
 
-    dmaStreamSetPeripheral(dacp->dma, &dacp->params->dac->DHR12L1 +
-                                      dacp->params->dataoffset);
+    dacreg = &dacp->params->dac->DHR12L1 + dacp->params->dataoffset;
     dmamode = dacp->params->dmamode |
 #if STM32_DMA_ADVANCED == FALSE
               STM32_DMA_CR_PSIZE_WORD  | STM32_DMA_CR_MSIZE_HWORD;
@@ -810,10 +793,9 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
 #endif
     break;
   case DAC_DHRM_8BIT_RIGHT:
-    chDbgAssert(dacp->grpp->num_channels == 1, "invalid number of channels");
+    nch = 1U;
 
-    dmaStreamSetPeripheral(dacp->dma, &dacp->params->dac->DHR8R1 +
-                                      dacp->params->dataoffset);
+    dacreg = &dacp->params->dac->DHR8R1 + dacp->params->dataoffset;
     dmamode = dacp->params->dmamode |
 #if STM32_DMA_ADVANCED == FALSE
               STM32_DMA_CR_PSIZE_WORD  | STM32_DMA_CR_MSIZE_BYTE;
@@ -827,25 +809,25 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
     break;
 #if STM32_DAC_DUAL_MODE == TRUE
   case DAC_DHRM_12BIT_RIGHT_DUAL:
-    chDbgAssert(dacp->grpp->num_channels == 2, "invalid number of channels");
+    nch = 2U;
 
-    dmaStreamSetPeripheral(dacp->dma, &dacp->params->dac->DHR12RD);
+    dacreg = &dacp->params->dac->DHR12RD;
     dmamode = dacp->params->dmamode |
               STM32_DMA_CR_PSIZE_WORD | STM32_DMA_CR_MSIZE_WORD;
     n /= 2;
     break;
   case DAC_DHRM_12BIT_LEFT_DUAL:
-    chDbgAssert(dacp->grpp->num_channels == 2, "invalid number of channels");
+    nch = 2U;
 
-    dmaStreamSetPeripheral(dacp->dma, &dacp->params->dac->DHR12LD);
+    dacreg = &dacp->params->dac->DHR12LD;
     dmamode = dacp->params->dmamode |
               STM32_DMA_CR_PSIZE_WORD | STM32_DMA_CR_MSIZE_WORD;
     n /= 2;
     break;
   case DAC_DHRM_8BIT_RIGHT_DUAL:
-    chDbgAssert(dacp->grpp->num_channels == 1, "invalid number of channels");
+    nch = 1U;
 
-    dmaStreamSetPeripheral(dacp->dma, &dacp->params->dac->DHR8RD);
+    dacreg = &dacp->params->dac->DHR8RD;
     dmamode = dacp->params->dmamode |
 #if STM32_DMA_ADVANCED == FALSE
               STM32_DMA_CR_PSIZE_WORD  | STM32_DMA_CR_MSIZE_HWORD;
@@ -856,9 +838,28 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
     break;
 #endif
   default:
-    chDbgAssert(false, "unexpected DAC mode");
     return HAL_RET_CONFIG_ERROR;
   }
+
+  if (dacp->grpp->num_channels != nch) {
+    return HAL_RET_CONFIG_ERROR;
+  }
+
+  /* Identifies restarts from callbacks even when group/buffer are reused.*/
+  dacp->sequence++;
+
+  /* Allocating the DMA channel.*/
+  dacp->dma = dmaStreamAllocI(dacp->params->dmastream,
+                              dacp->params->dmairqprio,
+                              (stm32_dmaisr_t)dac_lld_serve_tx_interrupt,
+                              (void *)dacp);
+  if (dacp->dma == NULL) {
+    return HAL_RET_NO_RESOURCE;
+  }
+#if STM32_DMA_SUPPORTS_DMAMUX
+  dmaSetRequestSource(dacp->dma, dacp->params->peripheral);
+#endif
+  dmaStreamSetPeripheral(dacp->dma, dacreg);
 
   dmaStreamSetMemory0(dacp->dma, dacp->samples);
   dmaStreamSetTransactionSize(dacp->dma, n);

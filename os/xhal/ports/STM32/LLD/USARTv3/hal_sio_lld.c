@@ -426,7 +426,10 @@ msg_t sio_lld_start(SIODriver *siop) {
     config = &default_config;
   }
   siop->config = sio_lld_setcfg(siop, config);
-  chDbgAssert(siop->config != NULL, "configuration failed");
+  if (siop->config == NULL) {
+    sio_lld_stop(siop);
+    return HAL_RET_CONFIG_ERROR;
+  }
 
   return HAL_RET_SUCCESS;
 }
@@ -533,6 +536,9 @@ const SIOConfig *sio_lld_setcfg(SIODriver *siop, const SIOConfig *config) {
 
   brr = stm32_usart_get_brr(u, config->baud,
                             config->presc, config->cr1);
+  if (brr == 0U) {
+    return NULL;
+  }
 
   /* Setting up USART, FIFO mode enforced but ignored in devices without FIFO.*/
   u->CR1   = (config->cr1 & ~USART_CR1_CFG_FORBIDDEN) | USART_CR1_FIFOEN;

@@ -858,14 +858,15 @@ msg_t adc_lld_start_conversion(hal_adc_driver_c *adcp, unsigned grpnum,
   }
 
   grpp = &config->grps->grps[grpnum];
+  if (STM32_ADC_DUAL_MODE && ((grpp->num_channels & 1U) != 0U)) {
+    return HAL_RET_CONFIG_ERROR;
+  }
+
   adcp->grpp = grpp;
   circular = (adcp->state == ADC_ACTIVE_CIRCULAR);
 #if STM32_ADC_DUAL_MODE
   ccr = grpp->ccr & ~(ADC_CCR_CKMODE_MASK | ADC_CCR_MDMA_MASK);
 #endif
-
-  chDbgAssert(!STM32_ADC_DUAL_MODE || ((grpp->num_channels & 1) == 0),
-                "odd number of channels in dual mode");
 
   /* Calculating control registers values.*/
   dmamode = adcp->dmamode;

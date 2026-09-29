@@ -504,6 +504,8 @@ typedef enum {
  *          to the double-DMA restriction above. The full circular buffer
  *          must fit STM32_DMA3_MAX_TRANSFER bytes (depth times 1/2 bytes in
  *          single 8/12-bit mode, or 2/4 bytes in dual 8/12-bit mode).
+ *          Depth, size and alignment requirements are operation preconditions,
+ *          checked when debug assertions are enabled.
  * @note    Depth-one conversions report full-buffer events only, without
  *          half-buffer callbacks, regardless of the data format.
  */

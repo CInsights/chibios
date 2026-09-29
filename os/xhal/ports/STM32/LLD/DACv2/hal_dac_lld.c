@@ -372,7 +372,6 @@ static msg_t put_channel(DACDriver *dacp,
 #endif
       break;
     default:
-      chDbgAssert(false, "unknown DAC mode");
       return HAL_RET_CONFIG_ERROR;
   }
   return HAL_RET_SUCCESS;
@@ -838,21 +837,17 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
   dacchannel_t ch_num;
 #endif
 
-  /* A conversion needs one sample frame or a positive even depth. This is
-     also enforced when frontend debug checks are compiled out.*/
-  if ((dacp->depth == 0U) ||
-      ((dacp->depth > 1U) && ((dacp->depth & 1U) != 0U))) {
-    chDbgAssert(false, "invalid depth");
-    return HAL_RET_CONFIG_ERROR;
-  }
+  /* Conversion depth is an operation precondition, not a configuration
+     structure field.*/
+  chDbgAssert((dacp->depth > 0U) &&
+                ((dacp->depth == 1U) || ((dacp->depth & 1U) == 0U)),
+                "invalid depth");
 
   if ((dacp->grpp->trigger & ~DAC_TRG_MASK) != 0U) {
-    chDbgAssert(false, "invalid trigger");
     return HAL_RET_CONFIG_ERROR;
   }
 
   if (dacp->grpp->num_channels < 1) {
-    chDbgAssert(false, "invalid number of channels");
     return HAL_RET_CONFIG_ERROR;
   }
 
@@ -863,29 +858,22 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
   if (dual) {
     /* Dual holding registers contain one sample for each physical channel.*/
     if ((cfg->mcr & (DAC_MCR_DMADOUBLE1 | DAC_MCR_DMADOUBLE2)) != 0U) {
-      chDbgAssert(false, "double DMA not supported in dual conversion");
       return HAL_RET_CONFIG_ERROR;
     }
-    if ((cfg->datamode != DAC_DHRM_8BIT_RIGHT_DUAL) &&
-        (((uintptr_t)dacp->samples & 3U) != 0U)) {
-      chDbgAssert(false, "unaligned dual DMA buffer");
-      return HAL_RET_CONFIG_ERROR;
-    }
+    chDbgAssert((cfg->datamode == DAC_DHRM_8BIT_RIGHT_DUAL) ||
+                  (((uintptr_t)dacp->samples & 3U) == 0U),
+                  "unaligned dual DMA buffer");
   }
 #endif
 
   if (dacddma) {
     /* Each request transfers two samples, including the initial preload.*/
-    if ((dacp->depth < 2U) || ((dacp->depth & 1U) != 0U)) {
-      chDbgAssert(false, "double DMA requires sample pairs");
-      return HAL_RET_CONFIG_ERROR;
-    }
-    if (((cfg->datamode == DAC_DHRM_12BIT_RIGHT) ||
-         (cfg->datamode == DAC_DHRM_12BIT_LEFT)) &&
-        (((uintptr_t)dacp->samples & 3U) != 0U)) {
-      chDbgAssert(false, "unaligned double DMA buffer");
-      return HAL_RET_CONFIG_ERROR;
-    }
+    chDbgAssert((dacp->depth >= 2U) && ((dacp->depth & 1U) == 0U),
+                  "double DMA requires sample pairs");
+    chDbgAssert(((cfg->datamode != DAC_DHRM_12BIT_RIGHT) &&
+                 (cfg->datamode != DAC_DHRM_12BIT_LEFT)) ||
+                  (((uintptr_t)dacp->samples & 3U) == 0U),
+                  "unaligned double DMA buffer");
   }
 
   /* DMA settings depend on the chosen DAC mode. If not in dual mode then each
@@ -962,24 +950,20 @@ msg_t dac_lld_start_conversion(DACDriver *dacp) {
 
 #endif /* STM32_DAC_DUAL_MODE == TRUE */
     default:
-      chDbgAssert(false, "dual mode not enabled or invalid register identity");
       return HAL_RET_CONFIG_ERROR;
   } /* End switch.*/
 
   /* Check configuration and setup DMA.*/
   if (dacp->grpp->num_channels != nch) {
-    chDbgAssert(false, "invalid number of channels");
     return HAL_RET_CONFIG_ERROR;
   }
 
   /* Check the full depth before multiplying or narrowing to a DMA count.*/
-  if (dacp->depth > (STM32_DMA3_MAX_TRANSFER / mult)) {
-    chDbgAssert(false, "unsupported GPDMA transfer size");
-    return HAL_RET_CONFIG_ERROR;
-  }
+  chDbgAssert(dacp->depth <= (STM32_DMA3_MAX_TRANSFER / mult),
+                "unsupported GPDMA transfer size");
   n = (uint32_t)dacp->depth * mult;
 
-  /* Read initial values only after validating the group and transfer size.*/
+  /* Read initial values after group validation and transfer precondition checks.*/
   if (cfg->datamode == DAC_DHRM_8BIT_RIGHT) {
     chx = ((uint8_t *)dacp->samples)[0];
     if (dacddma) {

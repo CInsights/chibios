@@ -177,7 +177,7 @@ static uint32_t usart_get_clock(USART_TypeDef *u) {
  * @param[in] baud      requested baud rate
  * @param[in] presc     prescaler register value, zero if unsupported
  * @param[in] cr1       configuration CR1 value, used for oversampling mode
- * @return              The BRR value.
+ * @return              The BRR value, or zero if the configuration is invalid.
  *
  * @notapi
  */
@@ -192,15 +192,19 @@ uint32_t stm32_usart_get_brr(USART_TypeDef *u, uint32_t baud,
   uint64_t denominator, brr;
   bool over8 = false;
 
-  chDbgAssert(baud > 0U, "invalid baud rate");
+  if (baud == 0U) {
+    return 0U;
+  }
 
 #if defined(USART_PRESC_PRESCALER)
-  chDbgAssert(presc < (sizeof prescvals / sizeof prescvals[0]),
-                "invalid USART prescaler");
+  if (presc >= (sizeof prescvals / sizeof prescvals[0])) {
+    return 0U;
+  }
   denominator = (uint64_t)baud * prescvals[presc];
 #else
-  chDbgAssert(presc == 0U, "USART prescaler unsupported");
-  (void)presc;
+  if (presc != 0U) {
+    return 0U;
+  }
   denominator = baud;
 #endif
 
@@ -209,12 +213,14 @@ uint32_t stm32_usart_get_brr(USART_TypeDef *u, uint32_t baud,
 
 #if defined(STM32_HAS_LPUART1) && STM32_HAS_LPUART1
   if (u == LPUART1) {
-    chDbgAssert(((uint64_t)clock >= denominator * 3U) &&
-                  ((uint64_t)clock <= denominator * 4096U),
-                  "invalid baud rate vs input clock");
+    if (((uint64_t)clock < denominator * 3U) ||
+        ((uint64_t)clock > denominator * 4096U)) {
+      return 0U;
+    }
     brr = ((uint64_t)clock * 256U + denominator / 2U) / denominator;
-    chDbgAssert((brr >= 0x300U) && (brr < 0x100000U),
-                  "invalid BRR value");
+    if ((brr < 0x300U) || (brr >= 0x100000U)) {
+      return 0U;
+    }
 
     return (uint32_t)brr;
   }
@@ -227,9 +233,10 @@ uint32_t stm32_usart_get_brr(USART_TypeDef *u, uint32_t baud,
 #endif
 
   brr = ((uint64_t)clock + denominator / 2U) / denominator;
-  chDbgAssert((brr >= (over8 ? 8U : 16U)) &&
-                (brr < (over8 ? 0x8000U : 0x10000U)),
-                "invalid BRR value");
+  if ((brr < (over8 ? 8U : 16U)) ||
+      (brr >= (over8 ? 0x8000U : 0x10000U))) {
+    return 0U;
+  }
 
   /* OVER8 leaves BRR bit 3 clear and uses three fractional bits. The
      effective divider is rounded above, including any carry.*/

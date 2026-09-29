@@ -605,29 +605,31 @@ msg_t adc_lld_start_conversion(hal_adc_driver_c *adcp, unsigned grpnum,
   }
 
   grpp = &cfg->grps->grps[grpnum];
-  adcp->grpp = grpp;
-  circular = adcp->state == ADC_ACTIVE_CIRCULAR;
 
 #if STM32_ADC_DUAL_MODE
-  chDbgAssert((grpp->num_channels >= 2U) &&
-                (grpp->num_channels <= 32U) &&
-                ((grpp->num_channels & 1U) == 0U),
-                "invalid number of channels");
-  chDbgAssert(adc_lld_is_valid_dual_mode(grpp->ccr),
-                "invalid dual mode");
+  if ((grpp->num_channels < 2U) || (grpp->num_channels > 32U) ||
+      ((grpp->num_channels & 1U) != 0U) ||
+      !adc_lld_is_valid_dual_mode(grpp->ccr)) {
+    return HAL_RET_CONFIG_ERROR;
+  }
 #else
-  chDbgAssert((grpp->num_channels >= 1U) &&
-                (grpp->num_channels <= 16U),
-                "invalid number of channels");
+  if ((grpp->num_channels < 1U) || (grpp->num_channels > 16U)) {
+    return HAL_RET_CONFIG_ERROR;
+  }
 #endif
 
 #if STM32_ADC_COMPACT_SAMPLES
-  chDbgAssert((grpp->cfgr & ADC_CFGR1_RES_MASK) == ADC_CFGR1_RES_8BITS,
-                "compact samples require 8-bit resolution");
+  if ((grpp->cfgr & ADC_CFGR1_RES_MASK) != ADC_CFGR1_RES_8BITS) {
+    return HAL_RET_CONFIG_ERROR;
+  }
 #elif STM32_ADC_DUAL_MODE
-  chDbgAssert((grpp->cfgr & ADC_CFGR1_RES_MASK) != ADC_CFGR1_RES_8BITS,
-                "8-bit dual mode requires compact samples");
+  if ((grpp->cfgr & ADC_CFGR1_RES_MASK) == ADC_CFGR1_RES_8BITS) {
+    return HAL_RET_CONFIG_ERROR;
+  }
 #endif
+
+  adcp->grpp = grpp;
+  circular = adcp->state == ADC_ACTIVE_CIRCULAR;
 
 #if STM32_ADC_DUAL_MODE
   /* Common dual-mode fields can only be changed with both ADCs disabled.*/
