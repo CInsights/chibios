@@ -98,8 +98,9 @@
 #define HAL_RET_SUCCESS         MSG_OK
 /**
  * @brief   Configuration error.
- * @details An error has been detected in the driver configuration structure
- *          or in the requested operation parameters.
+ * @details An error has been detected in a driver configuration structure
+ *          or conversion group. Operation preconditions such as transfer
+ *          sizes and buffer alignment are checked using debug assertions.
  */
 #define HAL_RET_CONFIG_ERROR    (msg_t)-16
 /**
