@@ -1211,6 +1211,7 @@ usb_lld_stall_out(self, 0);
 self->receiving &= ~1U;
 self->transmitting &= ~1U;
 self->ep0n = 0U;
+self->ep0endcb = NULL;
 self->ep0state = USB_EP0_ERROR;
 chSysUnlock();
 
@@ -1270,19 +1271,20 @@ case (uint32_t)USB_RTYPE_RECIPIENT_DEVICE |
   break;
 case (uint32_t)USB_RTYPE_RECIPIENT_DEVICE |
      ((uint32_t)USB_REQ_SET_ADDRESS << 8):
+  chSysLock();
+  if ((self->state == HAL_DRV_STATE_STOP) ||
+      (self->ep0rseq != self->ep0seq)) {
+    chSysUnlock();
+    return MSG_RESET;
+  }
 #if USB_SET_ADDRESS_MODE == USB_EARLY_SET_ADDRESS
   self->address = self->setup[2];
   usb_lld_set_address(self);
 #endif
+  /* Commit before another SETUP or reset can replace the request state.*/
+  self->ep0endcb = set_address;
+  chSysUnlock();
   msg = usbEp0Acknowledge(self);
-  if (msg == MSG_OK) {
-#if USB_SET_ADDRESS_MODE == USB_LATE_SET_ADDRESS
-    set_address_thread(self);
-#else
-    usb_invoke_event_cb(self, USB_FLAGS_ADDRESS);
-    self->state = USB_SELECTED;
-#endif
-  }
   break;
 case (uint32_t)USB_RTYPE_RECIPIENT_DEVICE |
      ((uint32_t)USB_REQ_GET_DESCRIPTOR << 8):
@@ -2264,6 +2266,9 @@ case USB_EP0_IN_WAITING_TX0:
   chSysUnlockFromISR();
   return;
 case USB_EP0_IN_SENDING_STS:
+  if (usbp->ep0endcb != NULL) {
+    usbp->ep0endcb(usbp);
+  }
   setup_reset(usbp);
   chSysLockFromISR();
   ep0_resume_waiterI(usbp, MSG_OK);
@@ -2301,6 +2306,9 @@ case USB_EP0_OUT_RX:
 case USB_EP0_OUT_WAITING_STS:
   if (usbGetReceiveTransactionSizeX(usbp, 0U) != 0U) {
     break;
+  }
+  if (usbp->ep0endcb != NULL) {
+    usbp->ep0endcb(usbp);
   }
   setup_reset(usbp);
   chSysLockFromISR();
@@ -2383,6 +2391,7 @@ usbp->events |= flags;
 usbp->receiving &= ~1U;
 usbp->transmitting &= ~1U;
 usbp->ep0n = 0U;
+usbp->ep0endcb = NULL;
 usbp->ep0state = USB_EP0_STP_WAITING;]]></implementation>
       </function>
       <function name="setup_error" ctype="void">
@@ -2394,6 +2403,7 @@ usb_invoke_event_cb(usbp, USB_FLAGS_STALLED);
 usbp->receiving &= ~1U;
 usbp->transmitting &= ~1U;
 usbp->ep0n = 0U;
+usbp->ep0endcb = NULL;
 usbp->ep0state = USB_EP0_ERROR;]]></implementation>
       </function>
       <function name="ep0_resume_waiterI" ctype="void">
@@ -2407,6 +2417,7 @@ chThdResumeI(&usbp->ep0thread, msg);]]></implementation>
         <implementation><![CDATA[
 usbp->ep0setup = 0U;
 usbp->ep0reset = 1U;
+usbp->ep0endcb = NULL;
 usbp->ep0seq++;
 ep0_resume_waiterI(usbp, MSG_RESET);]]></implementation>
       </function>
@@ -2416,19 +2427,20 @@ ep0_resume_waiterI(usbp, MSG_RESET);]]></implementation>
         <implementation><![CDATA[
 usbp->ep0setup = 1U;
 usbp->ep0reset = 0U;
+usbp->ep0endcb = NULL;
 usbp->ep0seq++;
 ep0_resume_waiterI(usbp, msg);]]></implementation>
       </function>
-      <condition check="USB_SET_ADDRESS_MODE == USB_LATE_SET_ADDRESS">
-      <function name="set_address_thread" ctype="void">
+      <function name="set_address" ctype="void">
         <param name="usbp" ctype="hal_usb_driver_c *" dir="both"></param>
         <implementation><![CDATA[
+#if USB_SET_ADDRESS_MODE == USB_LATE_SET_ADDRESS
 usbp->address = usbp->setup[2];
 usb_lld_set_address(usbp);
+#endif
 usb_invoke_event_cb(usbp, USB_FLAGS_ADDRESS);
 usbp->state = USB_SELECTED;]]></implementation>
       </function>
-      </condition>
       <function name="ep0_reply_or_ack" ctype="msg_t">
         <param name="usbp" ctype="hal_usb_driver_c *" dir="both"></param>
         <param name="buf" ctype="const uint8_t *" dir="in"></param>
@@ -2460,9 +2472,8 @@ else {
 }
 
 msg = chThdSuspendTimeoutS(&usbp->ep0thread, TIME_INFINITE);
-if (usbp->ep0rseq != usbp->ep0seq) {
-  msg = MSG_RESET;
-}
+/* The wakeup records completion or abort. A later SETUP cannot undo a
+   completed status stage, even if this thread has not run in between.*/
 chSysUnlock();
 
 return msg;]]></implementation>
@@ -2498,9 +2509,7 @@ else {
 }
 
 msg = chThdSuspendTimeoutS(&usbp->ep0thread, TIME_INFINITE);
-if (usbp->ep0rseq != usbp->ep0seq) {
-  msg = MSG_RESET;
-}
+/* Preserve the result delivered before any subsequent SETUP or reset.*/
 chSysUnlock();
 
 return msg;]]></implementation>

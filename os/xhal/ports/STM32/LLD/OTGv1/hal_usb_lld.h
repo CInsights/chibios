@@ -326,11 +326,12 @@ typedef struct {
  */
 #define usb_lld_driver_fields                                              \
   stm32_otg_t                   *otg;                                      \
-  const stm32_otg_params_t       *otgparams;                                \
+  const stm32_otg_params_t      *otgparams;                                \
   uint32_t                      pmnext;                                    \
   USBEndpointConfig             ep0config;                                 \
   USBInEndpointState            ep0in;                                     \
   USBOutEndpointState           ep0out;                                    \
+  bool                          ep0setup_pending;                          \
   uint8_t                       ep0setup_buffer[8]
 
 /*===========================================================================*/

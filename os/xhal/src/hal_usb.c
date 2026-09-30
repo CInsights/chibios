@@ -100,6 +100,7 @@ static void setup_reset(hal_usb_driver_c *usbp) {
   usbp->receiving &= ~1U;
   usbp->transmitting &= ~1U;
   usbp->ep0n = 0U;
+  usbp->ep0endcb = NULL;
   usbp->ep0state = USB_EP0_STP_WAITING;
 }
 
@@ -110,6 +111,7 @@ static void setup_error(hal_usb_driver_c *usbp) {
   usbp->receiving &= ~1U;
   usbp->transmitting &= ~1U;
   usbp->ep0n = 0U;
+  usbp->ep0endcb = NULL;
   usbp->ep0state = USB_EP0_ERROR;
 }
 
@@ -120,6 +122,7 @@ static void ep0_resume_waiterI(hal_usb_driver_c *usbp, msg_t msg) {
 static void ep0_signal_resetI(hal_usb_driver_c *usbp) {
   usbp->ep0setup = 0U;
   usbp->ep0reset = 1U;
+  usbp->ep0endcb = NULL;
   usbp->ep0seq++;
   ep0_resume_waiterI(usbp, MSG_RESET);
 }
@@ -127,18 +130,19 @@ static void ep0_signal_resetI(hal_usb_driver_c *usbp) {
 static void ep0_signal_setupI(hal_usb_driver_c *usbp, msg_t msg) {
   usbp->ep0setup = 1U;
   usbp->ep0reset = 0U;
+  usbp->ep0endcb = NULL;
   usbp->ep0seq++;
   ep0_resume_waiterI(usbp, msg);
 }
 
-#if (USB_SET_ADDRESS_MODE == USB_LATE_SET_ADDRESS) || defined (__DOXYGEN__)
-static void set_address_thread(hal_usb_driver_c *usbp) {
+static void set_address(hal_usb_driver_c *usbp) {
+#if USB_SET_ADDRESS_MODE == USB_LATE_SET_ADDRESS
   usbp->address = usbp->setup[2];
   usb_lld_set_address(usbp);
+#endif
   usb_invoke_event_cb(usbp, USB_FLAGS_ADDRESS);
   usbp->state = USB_SELECTED;
 }
-#endif /* USB_SET_ADDRESS_MODE == USB_LATE_SET_ADDRESS */
 
 static msg_t ep0_reply_or_ack(hal_usb_driver_c *usbp, const uint8_t *buf,
                               size_t n) {
@@ -168,9 +172,8 @@ static msg_t ep0_reply_or_ack(hal_usb_driver_c *usbp, const uint8_t *buf,
   }
 
   msg = chThdSuspendTimeoutS(&usbp->ep0thread, TIME_INFINITE);
-  if (usbp->ep0rseq != usbp->ep0seq) {
-    msg = MSG_RESET;
-  }
+  /* The wakeup records completion or abort. A later SETUP cannot undo a
+     completed status stage, even if this thread has not run in between.*/
   chSysUnlock();
 
   return msg;
@@ -204,9 +207,7 @@ static msg_t ep0_receive_or_status(hal_usb_driver_c *usbp, uint8_t *buf,
   }
 
   msg = chThdSuspendTimeoutS(&usbp->ep0thread, TIME_INFINITE);
-  if (usbp->ep0rseq != usbp->ep0seq) {
-    msg = MSG_RESET;
-  }
+  /* Preserve the result delivered before any subsequent SETUP or reset.*/
   chSysUnlock();
 
   return msg;
@@ -894,6 +895,9 @@ void _usb_ep0in(hal_usb_driver_c *usbp, usbep_t ep) {
     chSysUnlockFromISR();
     return;
   case USB_EP0_IN_SENDING_STS:
+    if (usbp->ep0endcb != NULL) {
+      usbp->ep0endcb(usbp);
+    }
     setup_reset(usbp);
     chSysLockFromISR();
     ep0_resume_waiterI(usbp, MSG_OK);
@@ -933,6 +937,9 @@ void _usb_ep0out(hal_usb_driver_c *usbp, usbep_t ep) {
   case USB_EP0_OUT_WAITING_STS:
     if (usbGetReceiveTransactionSizeX(usbp, 0U) != 0U) {
       break;
+    }
+    if (usbp->ep0endcb != NULL) {
+      usbp->ep0endcb(usbp);
     }
     setup_reset(usbp);
     chSysLockFromISR();
@@ -2029,6 +2036,7 @@ void usbEp0Stall(void *ip) {
   self->receiving &= ~1U;
   self->transmitting &= ~1U;
   self->ep0n = 0U;
+  self->ep0endcb = NULL;
   self->ep0state = USB_EP0_ERROR;
   chSysUnlock();
 
@@ -2092,19 +2100,20 @@ msg_t usbEp0HandleStandardRequest(void *ip, bool *handledp) {
     break;
   case (uint32_t)USB_RTYPE_RECIPIENT_DEVICE |
        ((uint32_t)USB_REQ_SET_ADDRESS << 8):
+    chSysLock();
+    if ((self->state == HAL_DRV_STATE_STOP) ||
+        (self->ep0rseq != self->ep0seq)) {
+      chSysUnlock();
+      return MSG_RESET;
+    }
 #if USB_SET_ADDRESS_MODE == USB_EARLY_SET_ADDRESS
     self->address = self->setup[2];
     usb_lld_set_address(self);
 #endif
+    /* Commit before another SETUP or reset can replace the request state.*/
+    self->ep0endcb = set_address;
+    chSysUnlock();
     msg = usbEp0Acknowledge(self);
-    if (msg == MSG_OK) {
-#if USB_SET_ADDRESS_MODE == USB_LATE_SET_ADDRESS
-      set_address_thread(self);
-#else
-      usb_invoke_event_cb(self, USB_FLAGS_ADDRESS);
-      self->state = USB_SELECTED;
-#endif
-    }
     break;
   case (uint32_t)USB_RTYPE_RECIPIENT_DEVICE |
        ((uint32_t)USB_REQ_GET_DESCRIPTOR << 8):

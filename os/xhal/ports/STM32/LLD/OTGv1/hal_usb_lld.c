@@ -102,6 +102,7 @@ static const hal_usb_config_t default_usb_config = {};
 static void otg_object_init(hal_usb_driver_c *usbp) {
 
   usbObjectInit(usbp);
+  usbp->ep0setup_pending = false;
   usbp->ep0config = (USBEndpointConfig) {
     USB_EP_MODE_TYPE_CTRL, _usb_ep0setup, _usb_ep0in, _usb_ep0out,
     EP0_MAX_INSIZE, EP0_MAX_OUTSIZE, &usbp->ep0in, &usbp->ep0out,
@@ -307,6 +308,36 @@ static void otg_txfifo_flush(hal_usb_driver_c *usbp, uint32_t fifo) {
 }
 
 /**
+ * @brief   Discards EP0 IN data belonging to the previous control transfer.
+ * @note    Called after SETUP, which puts both EP0 directions in NAK mode.
+ *
+ * @param[in] usbp      pointer to the @p hal_usb_driver_c object
+ *
+ * @notapi
+ */
+static void otg_ep0_abort_in(hal_usb_driver_c *usbp) {
+  stm32_otg_t *otgp = usbp->otg;
+  unsigned timeout = 1000U;
+
+  otgp->DIEPEMPMSK &= ~DIEPEMPMSK_INEPTXFEM(0);
+  if ((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) != 0U) {
+    otgp->ie[0].DIEPCTL |= DIEPCTL_EPDIS | DIEPCTL_SNAK;
+  }
+
+  /* Do not flush while the core can still access this FIFO. OUT EP0 must
+     not be disabled, and the shared RX FIFO contains the new SETUP.*/
+  while (((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) != 0U) ||
+         ((otgp->GRSTCTL & GRSTCTL_AHBIDL) == 0U)) {
+    if (--timeout == 0U) {
+      chSysHalt("EP0 IN disable timeout");
+    }
+    chSysPolledDelayX(US2RTC(SystemCoreClock, 1U));
+  }
+  otg_txfifo_flush(usbp, 0U);
+  otgp->ie[0].DIEPINT = 0xFFFFFFFFU;
+}
+
+/**
  * @brief   Resets the FIFO RAM memory allocator.
  *
  * @param[in] usbp      pointer to the @p hal_usb_driver_c object
@@ -431,6 +462,11 @@ static void otg_rxfifo_handler(hal_usb_driver_c *usbp) {
 
   switch (sts & GRXSTSP_PKTSTS_MASK) {
   case GRXSTSP_SETUP_DATA:
+    if (ep == 0U) {
+      /* SETUP-done can arrive later. Do not restart or refill the old IN
+         transfer after the core has NAKed it on SETUP reception.*/
+      usbp->ep0setup_pending = true;
+    }
     otg_fifo_read_to_buffer(usbp->otg->FIFO[0],
                            epcp != NULL ? epcp->setup_buf : NULL, n,
                            (epcp != NULL && epcp->setup_buf != NULL) ? 8U : 0U);
@@ -530,6 +566,12 @@ static void otg_epin_handler(hal_usb_driver_c *usbp, usbep_t ep) {
     return;
   }
 
+  if ((ep == 0U) && usbp->ep0setup_pending &&
+      (usbp->ep0state != USB_EP0_IN_SENDING_STS)) {
+    otgp->DIEPEMPMSK &= ~DIEPEMPMSK_INEPTXFEM(0);
+    return;
+  }
+
   if ((epint & DIEPINT_XFRC) && (otgp->DIEPMSK & DIEPMSK_XFRCM)) {
     USBInEndpointState *isp = usbp->epc[ep]->in_state;
 
@@ -561,20 +603,20 @@ static void otg_epin_handler(hal_usb_driver_c *usbp, usbep_t ep) {
 static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep) {
   stm32_otg_t *otgp = usbp->otg;
   uint32_t epint = otgp->oe[ep].DOEPINT;
+  bool setup = ((epint & DOEPINT_STUP) != 0U) &&
+               ((otgp->DOEPMSK & DOEPMSK_STUPM) != 0U);
 
   otgp->oe[ep].DOEPINT = epint;
   if (usbp->epc[ep] == NULL) {
     return;
   }
 
-  if ((epint & DOEPINT_STUP) && (otgp->DOEPMSK & DOEPMSK_STUPM)) {
-    _usb_isr_invoke_setup_cb(usbp, ep);
-    /* SETUP aborts the previous transfer, including any stale XFRC.*/
-    return;
-  }
-
+  /* A completed OUT status stage precedes the next SETUP. Other pending
+     completions belong to an aborted transfer and must not advance it.*/
   if ((epint & DOEPINT_XFRC) && (otgp->DOEPMSK & DOEPMSK_XFRCM) &&
-      (usbp->epc[ep]->out_state != NULL)) {
+      (usbp->epc[ep]->out_state != NULL) &&
+      (!setup || ((ep == 0U) &&
+                  (usbp->ep0state == USB_EP0_OUT_WAITING_STS)))) {
     USBOutEndpointState *osp = usbp->epc[ep]->out_state;
 
 #if defined(STM32_OTG_SEQUENCE_WORKAROUND)
@@ -592,6 +634,16 @@ static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep) {
     }
 
     _usb_isr_invoke_out_cb(usbp, ep);
+  }
+
+  if (setup) {
+    if (ep == 0U) {
+      /* Any completed status stage has been delivered first. Discard the
+         remaining IN transaction before waking the new SETUP owner.*/
+      otg_ep0_abort_in(usbp);
+      usbp->ep0setup_pending = false;
+    }
+    _usb_isr_invoke_setup_cb(usbp, ep);
   }
 }
 /**
@@ -764,11 +816,12 @@ irq_retry:
   /* Only dispatch enabled endpoints belonging to this OTG instance.*/
   src = otgp->DAINT & otgp->DAINTMSK;
   for (ep = 0U; ep <= usbp->otgparams->num_endpoints; ep++) {
-    if ((sts & GINTSTS_OEPINT) && (src & DAINTMSK_OEPM(ep))) {
-      otg_epout_handler(usbp, (usbep_t)ep);
-    }
+    /* In particular, complete EP0 IN status before accepting a new SETUP.*/
     if ((sts & GINTSTS_IEPINT) && (src & DAINTMSK_IEPM(ep))) {
       otg_epin_handler(usbp, (usbep_t)ep);
+    }
+    if ((sts & GINTSTS_OEPINT) && (src & DAINTMSK_OEPM(ep))) {
+      otg_epout_handler(usbp, (usbep_t)ep);
     }
   }
 
@@ -1047,6 +1100,7 @@ void usb_lld_reset(hal_usb_driver_c *usbp) {
   otgp->DOEPMSK   = DOEPMSK_STUPM   | DOEPMSK_XFRCM;
 
   /* EP0 initialization, it is a special case.*/
+  usbp->ep0setup_pending = false;
   memset(&usbp->ep0in, 0, sizeof(usbp->ep0in));
   memset(&usbp->ep0out, 0, sizeof(usbp->ep0out));
   usbp->epc[0] = &usbp->ep0config;
@@ -1302,6 +1356,12 @@ void usb_lld_start_in(hal_usb_driver_c *usbp, usbep_t ep) {
   uint32_t mps = usbp->epc[ep]->in_maxsize;
   uint32_t pcnt, limit;
   size_t n = isp->txsize - isp->txcnt;
+
+  /* The old EP0 owner can still be running between SETUP data and SETUP-done.
+     Leave the endpoint NAKed until the latter aborts the old request.*/
+  if ((ep == 0U) && usbp->ep0setup_pending) {
+    return;
+  }
 
   chDbgAssert(mps != 0U, "zero packet size");
   limit = DIEPTSIZ_XFRSIZ_MASK / mps;
