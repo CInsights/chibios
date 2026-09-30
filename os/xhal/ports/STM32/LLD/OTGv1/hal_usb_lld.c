@@ -443,6 +443,9 @@ static void otg_fifo_read_to_buffer(volatile uint32_t *fifop,
   }
 }
 
+static void otg_epin_handler(hal_usb_driver_c *usbp, usbep_t ep);
+static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep, bool setup);
+
 /**
  * @brief   Incoming packets handler.
  *
@@ -470,6 +473,18 @@ static void otg_rxfifo_handler(hal_usb_driver_c *usbp) {
     otg_fifo_read_to_buffer(usbp->otg->FIFO[0],
                            epcp != NULL ? epcp->setup_buf : NULL, n,
                            (epcp != NULL && epcp->setup_buf != NULL) ? 8U : 0U);
+    break;
+  case GRXSTSP_SETUP_COMP:
+    /* Popping this marker raises STUP. Dispatch the saved SETUP before a
+       later FIFO entry can overwrite it, not after draining the whole FIFO.*/
+    if ((epcp != NULL) &&
+        ((usbp->otg->DOEPMSK & DOEPMSK_STUPM) != 0U)) {
+      if ((ep == 0U) && (usbp->ep0state == USB_EP0_IN_SENDING_STS)) {
+        /* A completed status stage still belongs to the previous request.*/
+        otg_epin_handler(usbp, 0U);
+      }
+      otg_epout_handler(usbp, (usbep_t)ep, true);
+    }
     break;
   case GRXSTSP_OUT_DATA:
     if ((epcp == NULL) || (epcp->out_state == NULL) ||
@@ -597,15 +612,16 @@ static void otg_epin_handler(hal_usb_driver_c *usbp, usbep_t ep) {
  *
  * @param[in] usbp      pointer to the @p hal_usb_driver_c object
  * @param[in] ep        endpoint number
+ * @param[in] setup     a SETUP completion marker has just been popped
  *
  * @notapi
  */
-static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep) {
+static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep, bool setup) {
   stm32_otg_t *otgp = usbp->otg;
   uint32_t epint = otgp->oe[ep].DOEPINT;
-  bool setup = ((epint & DOEPINT_STUP) != 0U) &&
-               ((otgp->DOEPMSK & DOEPMSK_STUPM) != 0U);
 
+  /* STUP is acknowledged here, but only its ordered FIFO marker can
+     dispatch a SETUP. A late endpoint interrupt must not dispatch it again.*/
   otgp->oe[ep].DOEPINT = epint;
   if (usbp->epc[ep] == NULL) {
     return;
@@ -615,8 +631,8 @@ static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep) {
      completions belong to an aborted transfer and must not advance it.*/
   if ((epint & DOEPINT_XFRC) && (otgp->DOEPMSK & DOEPMSK_XFRCM) &&
       (usbp->epc[ep]->out_state != NULL) &&
-      (!setup || ((ep == 0U) &&
-                  (usbp->ep0state == USB_EP0_OUT_WAITING_STS)))) {
+      ((!setup && !((ep == 0U) && usbp->ep0setup_pending)) ||
+       ((ep == 0U) && (usbp->ep0state == USB_EP0_OUT_WAITING_STS)))) {
     USBOutEndpointState *osp = usbp->epc[ep]->out_state;
 
 #if defined(STM32_OTG_SEQUENCE_WORKAROUND)
@@ -804,7 +820,7 @@ irq_retry:
     otg_isoc_out_failed_handler(usbp);
   }
 
-  /* Drain RX data before delivering transfer-complete or SETUP callbacks.*/
+  /* Drain RX data, dispatching SETUP at its FIFO completion marker.*/
   if ((sts & GINTSTS_RXFLVL) != 0U) {
     otg_rxfifo_handler(usbp);
     if (--retry > 0U) {
@@ -821,7 +837,7 @@ irq_retry:
       otg_epin_handler(usbp, (usbep_t)ep);
     }
     if ((sts & GINTSTS_OEPINT) && (src & DAINTMSK_OEPM(ep))) {
-      otg_epout_handler(usbp, (usbep_t)ep);
+      otg_epout_handler(usbp, (usbep_t)ep, false);
     }
   }
 
