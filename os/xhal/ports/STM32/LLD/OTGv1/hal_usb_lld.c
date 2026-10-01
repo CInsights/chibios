@@ -1904,15 +1904,25 @@ void usb_lld_stall_in(hal_usb_driver_c *usbp, usbep_t ep) {
  * @notapi
  */
 void usb_lld_clear_out(hal_usb_driver_c *usbp, usbep_t ep) {
+  volatile uint32_t *ctlp;
+  uint32_t ctl;
 
   if (ep > usbp->otgparams->num_endpoints) {
     return;
   }
   if ((ep != 0U) && (usbp->out_disable_phase != OTG_OUT_IDLE)) {
-    usbp->out_ctl[ep - 1U] &= ~DOEPCTL_STALL;
-    return;
+    ctlp = &usbp->out_ctl[ep - 1U];
   }
-  usbp->otg->oe[ep].DOEPCTL &= ~DOEPCTL_STALL;
+  else {
+    ctlp = &usbp->otg->oe[ep].DOEPCTL;
+  }
+  ctl = *ctlp & ~DOEPCTL_STALL;
+  if (((ctl & DOEPCTL_EPTYP_MASK) == DOEPCTL_EPTYP_BULK) ||
+      ((ctl & DOEPCTL_EPTYP_MASK) == DOEPCTL_EPTYP_INTR)) {
+    /* CLEAR_FEATURE(ENDPOINT_HALT) also resets the data toggle.*/
+    ctl = (ctl & ~DOEPCTL_SD1PID) | DOEPCTL_SD0PID;
+  }
+  *ctlp = ctl;
 }
 
 /**
@@ -1924,11 +1934,17 @@ void usb_lld_clear_out(hal_usb_driver_c *usbp, usbep_t ep) {
  * @notapi
  */
 void usb_lld_clear_in(hal_usb_driver_c *usbp, usbep_t ep) {
+  uint32_t ctl;
 
   if (ep > usbp->otgparams->num_endpoints) {
     return;
   }
-  usbp->otg->ie[ep].DIEPCTL &= ~DIEPCTL_STALL;
+  ctl = usbp->otg->ie[ep].DIEPCTL & ~DIEPCTL_STALL;
+  if (((ctl & DIEPCTL_EPTYP_MASK) == DIEPCTL_EPTYP_BULK) ||
+      ((ctl & DIEPCTL_EPTYP_MASK) == DIEPCTL_EPTYP_INTR)) {
+    ctl = (ctl & ~DIEPCTL_SD1PID) | DIEPCTL_SD0PID;
+  }
+  usbp->otg->ie[ep].DIEPCTL = ctl;
 }
 
 #endif /* HAL_USE_USB */
