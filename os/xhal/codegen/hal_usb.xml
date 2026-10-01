@@ -1502,7 +1502,11 @@ return flags;]]></implementation>
             </method>
             <method name="usbGetFrameNumberX" ctype="uint16_t">
               <brief>Returns the current USB frame number.</brief>
-              <return>The current USB frame number.</return>
+              <details>
+                The 11-bit frame number advances every millisecond and wraps
+                after 2047. At high speed, microframe bits are not included.
+              </details>
+              <return>The current USB frame number, in the range 0 to 2047.</return>
               <xclass />
               <implementation><![CDATA[
 (void)self;

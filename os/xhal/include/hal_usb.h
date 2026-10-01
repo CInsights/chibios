@@ -1497,9 +1497,12 @@ static inline usbeventflags_t usbGetAndClearEventsX(void *ip,
 
 /**
  * @brief       Returns the current USB frame number.
+ * @details     The 11-bit frame number advances every millisecond and wraps
+ *              after 2047. At high speed, microframe bits are not included.
  *
  * @param[in,out] ip            Pointer to a @p hal_usb_driver_c instance.
- * @return                      The current USB frame number.
+ * @return                      The current USB frame number, in the range 0 to
+ *                              2047.
  *
  * @xclass
  */

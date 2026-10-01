@@ -428,12 +428,6 @@ extern struct usb_configurations usb_configurations;
 #define STM32_OTG2_IS_USED
 #endif
 
-/**
- * @brief   Returns the current frame number.
- */
-#define usb_lld_get_frame_number(usbp)                                     \
-  (((usbp)->otg->DSTS & DSTS_FNSOF_MASK) >> 8U)
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -449,6 +443,7 @@ extern "C" {
   void usb_lld_set_address(hal_usb_driver_c *usbp);
   void usb_lld_init_endpoint(hal_usb_driver_c *usbp, usbep_t ep);
   void usb_lld_disable_endpoints(hal_usb_driver_c *usbp);
+  uint16_t usb_lld_get_frame_number(hal_usb_driver_c *usbp);
   usbepstatus_t usb_lld_get_status_in(hal_usb_driver_c *usbp, usbep_t ep);
   usbepstatus_t usb_lld_get_status_out(hal_usb_driver_c *usbp, usbep_t ep);
   void usb_lld_read_setup(hal_usb_driver_c *usbp, usbep_t ep, uint8_t *buf);

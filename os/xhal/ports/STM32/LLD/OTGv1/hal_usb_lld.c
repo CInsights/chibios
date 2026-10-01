@@ -1285,6 +1285,30 @@ void usb_lld_disable_endpoints(hal_usb_driver_c *usbp) {
   }
 }
 /**
+ * @brief   Returns the current 11-bit USB frame number.
+ * @details High-speed microframe bits are excluded, so the frame number
+ *          advances every millisecond at both full and high speed.
+ *
+ * @param[in] usbp      pointer to the @p hal_usb_driver_c object
+ * @return              The current frame number, in the range 0 to 2047.
+ *
+ * @notapi
+ */
+uint16_t usb_lld_get_frame_number(hal_usb_driver_c *usbp) {
+  uint32_t dsts, frame;
+
+  /* Take speed and frame number from the same register snapshot. An HS PHY
+     can enumerate at FS, so use ENUMSPD rather than the PHY configuration.*/
+  dsts = usbp->otg->DSTS;
+  frame = (dsts & DSTS_FNSOF_MASK) >> 8U;
+  if ((dsts & DSTS_ENUMSPD_MASK) == DSTS_ENUMSPD_HS_480) {
+    frame >>= 3U;
+  }
+
+  return (uint16_t)(frame & 0x7FFU);
+}
+
+/**
  * @brief   Returns the status of an OUT endpoint.
  *
  * @param[in] usbp      pointer to the @p hal_usb_driver_c object
