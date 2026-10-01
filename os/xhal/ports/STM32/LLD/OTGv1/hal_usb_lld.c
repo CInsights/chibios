@@ -497,8 +497,9 @@ static bool otg_txfifo_flush(hal_usb_driver_c *usbp, uint32_t fifo) {
  */
 static bool otg_ep0_abort_in(hal_usb_driver_c *usbp) {
   stm32_otg_t *otgp = usbp->otg;
-  rtcnt_t start = chSysGetRealtimeCounterX();
-  rtcnt_t end = start + US2RTC(SystemCoreClock, OTG_OPERATION_TIMEOUT);
+  halcnt_t start = HAL_LLD_GET_CNT_VALUE();
+  halcnt_t timeout = (halcnt_t)US2RTC(HAL_LLD_GET_CNT_FREQUENCY(),
+                                     OTG_OPERATION_TIMEOUT);
 
   otgp->DIEPEMPMSK &= ~DIEPEMPMSK_INEPTXFEM(0);
   if ((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) != 0U) {
@@ -510,7 +511,12 @@ static bool otg_ep0_abort_in(hal_usb_driver_c *usbp) {
      Both registers share one deadline, unlike separate safety API waits.*/
   while (((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) != 0U) ||
          ((otgp->GRSTCTL & GRSTCTL_AHBIDL) == 0U)) {
-    if (!chSysIsCounterWithinX(chSysGetRealtimeCounterX(), start, end)) {
+    if ((halcnt_t)(HAL_LLD_GET_CNT_VALUE() - start) >= timeout) {
+      /* Hardware may have completed while this handler was preempted.*/
+      if (((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) == 0U) &&
+          ((otgp->GRSTCTL & GRSTCTL_AHBIDL) != 0U)) {
+        break;
+      }
       otg_fault(usbp);
       return true;
     }
