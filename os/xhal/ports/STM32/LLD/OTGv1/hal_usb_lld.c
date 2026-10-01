@@ -1759,6 +1759,10 @@ void usb_lld_start_out(hal_usb_driver_c *usbp, usbep_t ep) {
   uint32_t pcnt, limit, rxsize;
   size_t remaining = osp->rxsize - osp->rxcnt;
 
+  /* SETUP has already NAKed EP0; the old request must not rearm it.*/
+  if ((ep == 0U) && usbp->ep0setup_pending) {
+    return;
+  }
   if ((ep != 0U) && (usbp->out_disable_phase != OTG_OUT_IDLE)) {
     usbp->out_restart |= 1U << ep;
     return;
@@ -1863,7 +1867,8 @@ void usb_lld_start_in(hal_usb_driver_c *usbp, usbep_t ep) {
  */
 void usb_lld_stall_out(hal_usb_driver_c *usbp, usbep_t ep) {
 
-  if (ep > usbp->otgparams->num_endpoints) {
+  if ((ep > usbp->otgparams->num_endpoints) ||
+      ((ep == 0U) && usbp->ep0setup_pending)) {
     return;
   }
   if ((ep != 0U) && (usbp->out_disable_phase != OTG_OUT_IDLE)) {
@@ -1883,7 +1888,8 @@ void usb_lld_stall_out(hal_usb_driver_c *usbp, usbep_t ep) {
  */
 void usb_lld_stall_in(hal_usb_driver_c *usbp, usbep_t ep) {
 
-  if (ep > usbp->otgparams->num_endpoints) {
+  if ((ep > usbp->otgparams->num_endpoints) ||
+      ((ep == 0U) && usbp->ep0setup_pending)) {
     return;
   }
   usbp->otg->ie[ep].DIEPCTL |= DIEPCTL_STALL;
