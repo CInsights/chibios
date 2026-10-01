@@ -362,7 +362,11 @@ typedef struct {
  * @notapi
  */
 #if (STM32_OTG_STEPPING == 1) || defined(__DOXYGEN__)
-#define usb_lld_connect_bus(usbp) ((usbp)->otg->GCCFG |= GCCFG_VBUSBSEN)
+#define usb_lld_connect_bus(usbp)                                           \
+  do {                                                                      \
+    (usbp)->otg->GCCFG |= GCCFG_VBUSBSEN;                                   \
+    (usbp)->otg->DCTL &= ~DCTL_SDIS;                                        \
+  } while (false)
 #else
 #define usb_lld_connect_bus(usbp) ((usbp)->otg->DCTL &= ~DCTL_SDIS)
 #endif
@@ -373,7 +377,11 @@ typedef struct {
  * @notapi
  */
 #if (STM32_OTG_STEPPING == 1) || defined(__DOXYGEN__)
-#define usb_lld_disconnect_bus(usbp) ((usbp)->otg->GCCFG &= ~GCCFG_VBUSBSEN)
+#define usb_lld_disconnect_bus(usbp)                                        \
+  do {                                                                      \
+    (usbp)->otg->DCTL |= DCTL_SDIS;                                         \
+    (usbp)->otg->GCCFG &= ~GCCFG_VBUSBSEN;                                  \
+  } while (false)
 #else
 #define usb_lld_disconnect_bus(usbp) ((usbp)->otg->DCTL |= DCTL_SDIS)
 #endif
