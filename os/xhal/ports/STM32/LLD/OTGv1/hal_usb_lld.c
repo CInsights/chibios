@@ -297,6 +297,17 @@ static void otg_enable_ep(hal_usb_driver_c *usbp) {
   otgp->DAINTMSK = daintmsk;
 }
 
+/* Disconnect register updates require the caller's system lock.*/
+static void otg_disconnect_i(hal_usb_driver_c *usbp) {
+
+  chDbgCheckClassI();
+
+  usbp->otg->DCTL |= DCTL_SDIS;
+#if STM32_OTG_STEPPING == 1
+  usbp->otg->GCCFG &= ~GCCFG_VBUSBSEN;
+#endif
+}
+
 /* Called from unlocked IRQ handlers or locked endpoint initialization.
    Keep clocks on until drvStop(), but do not permit further bus activity.*/
 static void otg_fault(hal_usb_driver_c *usbp) {
@@ -307,7 +318,7 @@ static void otg_fault(hal_usb_driver_c *usbp) {
   otgp->GINTMSK = 0U;
   otgp->DAINTMSK = 0U;
   otgp->DIEPEMPMSK = 0U;
-  usb_lld_disconnect_bus(usbp);
+  otg_disconnect_i(usbp);
   otgp->DCTL &= ~DCTL_RWUSIG;
   usbp->isoc_in_pending = 0U;
   usbp->ep0setup_pending = false;
@@ -1407,6 +1418,21 @@ void usb_lld_connect_bus(hal_usb_driver_c *usbp) {
 #endif
     usbp->otg->DCTL &= ~DCTL_SDIS;
   }
+  chSysUnlock();
+}
+
+/**
+ * @brief   Disconnects the USB device from the bus.
+ *
+ * @param[in] usbp      pointer to the @p hal_usb_driver_c object
+ *
+ * @notapi
+ */
+void usb_lld_disconnect_bus(hal_usb_driver_c *usbp) {
+
+  /* Serialize register updates with wake-up, reset and fault IRQ handlers.*/
+  chSysLock();
+  otg_disconnect_i(usbp);
   chSysUnlock();
 }
 

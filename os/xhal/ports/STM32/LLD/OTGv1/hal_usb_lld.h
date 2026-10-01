@@ -361,21 +361,6 @@ typedef struct {
 #define usb_lld_get_transaction_size(usbp, ep)                              \
   ((usbp)->epc[ep]->out_state->rxcnt)
 
-/**
- * @brief   Disconnect the USB device.
- *
- * @notapi
- */
-#if (STM32_OTG_STEPPING == 1) || defined(__DOXYGEN__)
-#define usb_lld_disconnect_bus(usbp)                                        \
-  do {                                                                      \
-    (usbp)->otg->DCTL |= DCTL_SDIS;                                         \
-    (usbp)->otg->GCCFG &= ~GCCFG_VBUSBSEN;                                  \
-  } while (false)
-#else
-#define usb_lld_disconnect_bus(usbp) ((usbp)->otg->DCTL |= DCTL_SDIS)
-#endif
-
 /*===========================================================================*/
 /* External declarations.                                                    */
 /*===========================================================================*/
@@ -415,6 +400,7 @@ extern "C" {
   void usb_lld_init_endpoint(hal_usb_driver_c *usbp, usbep_t ep);
   void usb_lld_disable_endpoints(hal_usb_driver_c *usbp);
   void usb_lld_connect_bus(hal_usb_driver_c *usbp);
+  void usb_lld_disconnect_bus(hal_usb_driver_c *usbp);
   void usb_lld_wakeup_host(hal_usb_driver_c *usbp);
   uint16_t usb_lld_get_frame_number(hal_usb_driver_c *usbp);
   usbepstatus_t usb_lld_get_status_in(hal_usb_driver_c *usbp, usbep_t ep);
