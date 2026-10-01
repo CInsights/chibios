@@ -2169,6 +2169,8 @@ msg_t usbEp0HandleStandardRequest(void *ip, bool *handledp) {
   uint16_t recipient;
   uint16_t request;
   const usb_descriptor_t *dp;
+  usbep_t ep;
+  bool in;
 
   chDbgCheck((self != NULL) && (handledp != NULL));
 
@@ -2185,6 +2187,24 @@ msg_t usbEp0HandleStandardRequest(void *ip, bool *handledp) {
   recipient = self->setup[0] & USB_RTYPE_RECIPIENT_MASK;
   request = self->setup[1];
   type = recipient | (uint16_t)(request << 8U);
+  ep = self->setup[4] & 0x0FU;
+  in = (self->setup[4] & 0x80U) != 0U;
+
+  /* Endpoint addresses come from the host, not from a checked driver API.
+     Reject nonexistent endpoints and directions before any LLD access.*/
+  if (recipient == USB_RTYPE_RECIPIENT_ENDPOINT) {
+    chSysLock();
+    if (((self->setup[4] & 0x70U) != 0U) || (self->setup[5] != 0U) ||
+        (ep > USB_MAX_ENDPOINTS) || (self->epc[ep] == NULL) ||
+        (in ?
+         (self->epc[ep]->in_state == NULL) :
+         (self->epc[ep]->out_state == NULL))) {
+      chSysUnlock();
+      usbEp0Stall(self);
+      return MSG_OK;
+    }
+    chSysUnlock();
+  }
 
   switch (type) {
   case (uint32_t)USB_RTYPE_RECIPIENT_DEVICE |
@@ -2293,8 +2313,8 @@ msg_t usbEp0HandleStandardRequest(void *ip, bool *handledp) {
     break;
   case (uint32_t)USB_RTYPE_RECIPIENT_ENDPOINT |
        ((uint32_t)USB_REQ_GET_STATUS << 8):
-    if ((self->setup[4] & 0x80U) != 0U) {
-      switch (usb_lld_get_status_in(self, self->setup[4] & 0x0FU)) {
+    if (in) {
+      switch (usb_lld_get_status_in(self, ep)) {
       case EP_STATUS_STALLED:
         msg = usbEp0Reply(self, halted_status, 2U);
         break;
@@ -2308,7 +2328,7 @@ msg_t usbEp0HandleStandardRequest(void *ip, bool *handledp) {
       }
     }
     else {
-      switch (usb_lld_get_status_out(self, self->setup[4] & 0x0FU)) {
+      switch (usb_lld_get_status_out(self, ep)) {
       case EP_STATUS_STALLED:
         msg = usbEp0Reply(self, halted_status, 2U);
         break;
@@ -2326,12 +2346,12 @@ msg_t usbEp0HandleStandardRequest(void *ip, bool *handledp) {
        ((uint32_t)USB_REQ_CLEAR_FEATURE << 8):
     if (self->setup[2] == USB_FEATURE_ENDPOINT_HALT) {
       chSysLock();
-      if ((self->setup[4] & 0x0FU) != 0U) {
-        if ((self->setup[4] & 0x80U) != 0U) {
-          usb_lld_clear_in(self, self->setup[4] & 0x0FU);
+      if (ep != 0U) {
+        if (in) {
+          usb_lld_clear_in(self, ep);
         }
         else {
-          usb_lld_clear_out(self, self->setup[4] & 0x0FU);
+          usb_lld_clear_out(self, ep);
         }
       }
       chSysUnlock();
@@ -2345,12 +2365,12 @@ msg_t usbEp0HandleStandardRequest(void *ip, bool *handledp) {
        ((uint32_t)USB_REQ_SET_FEATURE << 8):
     if (self->setup[2] == USB_FEATURE_ENDPOINT_HALT) {
       chSysLock();
-      if ((self->setup[4] & 0x0FU) != 0U) {
-        if ((self->setup[4] & 0x80U) != 0U) {
-          usb_lld_stall_in(self, self->setup[4] & 0x0FU);
+      if (ep != 0U) {
+        if (in) {
+          usb_lld_stall_in(self, ep);
         }
         else {
-          usb_lld_stall_out(self, self->setup[4] & 0x0FU);
+          usb_lld_stall_out(self, ep);
         }
       }
       chSysUnlock();

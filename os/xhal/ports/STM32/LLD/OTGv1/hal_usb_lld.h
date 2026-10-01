@@ -334,6 +334,12 @@ typedef struct {
   const stm32_otg_params_t      *otgparams;                                \
   uint32_t                      pmnext;                                    \
   uint32_t                      isoc_in_pending;                           \
+  uint32_t                      out_disable_pending;                       \
+  uint32_t                      out_disable_wait;                          \
+  uint32_t                      out_restart;                               \
+  uint32_t                      out_ctl[USB_MAX_ENDPOINTS];                 \
+  systime_t                     out_disable_start;                         \
+  unsigned                      out_disable_phase;                         \
   USBEndpointConfig             ep0config;                                 \
   USBInEndpointState            ep0in;                                     \
   USBOutEndpointState           ep0out;                                    \
