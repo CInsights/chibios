@@ -170,7 +170,9 @@ static msg_t ep0_reply_or_ack(hal_usb_driver_c *usbp, const uint8_t *buf,
     chSysUnlock();
     return HAL_RET_HW_FAILURE;
   }
-  if ((usbp->state == HAL_DRV_STATE_STOP) || (usbp->ep0rseq != usbp->ep0seq)) {
+  if ((usbp->state == HAL_DRV_STATE_STOP) ||
+      (usbp->state == HAL_DRV_STATE_STOPPING) ||
+      (usbp->ep0rseq != usbp->ep0seq)) {
     chSysUnlock();
     return MSG_RESET;
   }
@@ -209,7 +211,9 @@ static msg_t ep0_receive_or_status(hal_usb_driver_c *usbp, uint8_t *buf,
     chSysUnlock();
     return HAL_RET_HW_FAILURE;
   }
-  if ((usbp->state == HAL_DRV_STATE_STOP) || (usbp->ep0rseq != usbp->ep0seq)) {
+  if ((usbp->state == HAL_DRV_STATE_STOP) ||
+      (usbp->state == HAL_DRV_STATE_STOPPING) ||
+      (usbp->ep0rseq != usbp->ep0seq)) {
     chSysUnlock();
     return MSG_RESET;
   }
@@ -1611,6 +1615,8 @@ void __usb_stop_impl(void *ip) {
     usbBinderUnbind(self->binder);
     self->binder = NULL;
   }
+  /* EP0 has a waiter even when USB_USE_SYNCHRONIZATION is disabled.*/
+  chSysLock();
   self->events        = (usbeventflags_t)0U;
   self->transmitting  = 0U;
   self->receiving     = 0U;
@@ -1618,7 +1624,6 @@ void __usb_stop_impl(void *ip) {
   self->ep0next       = NULL;
   self->ep0n          = 0U;
   self->ep0endcb      = NULL;
-  self->ep0thread     = NULL;
   self->ep0seq        = 0U;
   self->ep0rseq       = 0U;
   self->ep0setup      = 0U;
@@ -1627,9 +1632,7 @@ void __usb_stop_impl(void *ip) {
   self->address       = 0U;
   self->configuration = 0U;
   self->saved_state   = HAL_DRV_STATE_STOP;
-#if USB_USE_SYNCHRONIZATION == TRUE
-  chSysLock();
-#endif
+  chThdResumeI(&self->ep0thread, MSG_RESET);
   for (i = 0U; i <= (unsigned)USB_MAX_ENDPOINTS; i++) {
 #if USB_USE_SYNCHRONIZATION == TRUE
     if (self->epc[i] != NULL) {
@@ -1643,10 +1646,8 @@ void __usb_stop_impl(void *ip) {
 #endif
     self->epc[i] = NULL;
   }
-#if USB_USE_SYNCHRONIZATION == TRUE
   chSchRescheduleS();
   chSysUnlock();
-#endif
 }
 
 /**
@@ -2048,6 +2049,7 @@ msg_t usbEp0WaitSetup(void *ip) {
     return HAL_RET_HW_FAILURE;
   }
   if ((self->state == HAL_DRV_STATE_STOP) ||
+      (self->state == HAL_DRV_STATE_STOPPING) ||
       (self->state == HAL_DRV_STATE_UNINIT)) {
     chSysUnlock();
     return MSG_RESET;

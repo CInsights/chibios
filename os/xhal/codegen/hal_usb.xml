@@ -1181,6 +1181,7 @@ if (self->state == USB_ERROR) {
   return HAL_RET_HW_FAILURE;
 }
 if ((self->state == HAL_DRV_STATE_STOP) ||
+    (self->state == HAL_DRV_STATE_STOPPING) ||
     (self->state == HAL_DRV_STATE_UNINIT)) {
   chSysUnlock();
   return MSG_RESET;
@@ -1649,6 +1650,8 @@ if (self->binder != NULL) {
   usbBinderUnbind(self->binder);
   self->binder = NULL;
 }
+/* EP0 has a waiter even when USB_USE_SYNCHRONIZATION is disabled.*/
+chSysLock();
 self->events        = (usbeventflags_t)0U;
 self->transmitting  = 0U;
 self->receiving     = 0U;
@@ -1656,7 +1659,6 @@ self->ep0state      = USB_EP0_STP_WAITING;
 self->ep0next       = NULL;
 self->ep0n          = 0U;
 self->ep0endcb      = NULL;
-self->ep0thread     = NULL;
 self->ep0seq        = 0U;
 self->ep0rseq       = 0U;
 self->ep0setup      = 0U;
@@ -1665,9 +1667,7 @@ self->status        = 0U;
 self->address       = 0U;
 self->configuration = 0U;
 self->saved_state   = HAL_DRV_STATE_STOP;
-#if USB_USE_SYNCHRONIZATION == TRUE
-chSysLock();
-#endif
+chThdResumeI(&self->ep0thread, MSG_RESET);
 for (i = 0U; i <= (unsigned)USB_MAX_ENDPOINTS; i++) {
 #if USB_USE_SYNCHRONIZATION == TRUE
   if (self->epc[i] != NULL) {
@@ -1681,10 +1681,8 @@ for (i = 0U; i <= (unsigned)USB_MAX_ENDPOINTS; i++) {
 #endif
   self->epc[i] = NULL;
 }
-#if USB_USE_SYNCHRONIZATION == TRUE
 chSchRescheduleS();
-chSysUnlock();
-#endif]]></implementation>
+chSysUnlock();]]></implementation>
             </method>
             <method shortname="setcfg">
               <implementation><![CDATA[
@@ -2600,7 +2598,9 @@ if (usbp->state == USB_ERROR) {
   chSysUnlock();
   return HAL_RET_HW_FAILURE;
 }
-if ((usbp->state == HAL_DRV_STATE_STOP) || (usbp->ep0rseq != usbp->ep0seq)) {
+if ((usbp->state == HAL_DRV_STATE_STOP) ||
+    (usbp->state == HAL_DRV_STATE_STOPPING) ||
+    (usbp->ep0rseq != usbp->ep0seq)) {
   chSysUnlock();
   return MSG_RESET;
 }
@@ -2641,7 +2641,9 @@ if (usbp->state == USB_ERROR) {
   chSysUnlock();
   return HAL_RET_HW_FAILURE;
 }
-if ((usbp->state == HAL_DRV_STATE_STOP) || (usbp->ep0rseq != usbp->ep0seq)) {
+if ((usbp->state == HAL_DRV_STATE_STOP) ||
+    (usbp->state == HAL_DRV_STATE_STOPPING) ||
+    (usbp->ep0rseq != usbp->ep0seq)) {
   chSysUnlock();
   return MSG_RESET;
 }
