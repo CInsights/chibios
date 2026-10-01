@@ -236,6 +236,11 @@
 #error "USB driver activated but no USB peripheral assigned"
 #endif
 
+/* The safety module fallback counter cannot bound hardware waits.*/
+#if !defined(HAL_LLD_GET_CNT_VALUE) || !defined(HAL_LLD_GET_CNT_FREQUENCY)
+#error "OTGv1 requires HAL timeout counter hooks"
+#endif
+
 /* Maximum endpoint address.*/
 #if STM32_HAS_OTG1 && STM32_USB_USE_OTG1 && STM32_HAS_OTG2 && STM32_USB_USE_OTG2
   #if STM32_OTG1_ENDPOINTS < STM32_OTG2_ENDPOINTS

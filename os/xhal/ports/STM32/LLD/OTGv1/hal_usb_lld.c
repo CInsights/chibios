@@ -134,26 +134,12 @@ static const stm32_otg_params_t hsparams = {
 /* Driver local functions.                                                   */
 /*===========================================================================*/
 
-/* Returns true on timeout. The realtime counter also runs with IRQs masked.*/
-static bool otg_wait_grstctl(hal_usb_driver_c *usbp, uint32_t mask,
-                             uint32_t match) {
-  rtcnt_t start = chSysGetRealtimeCounterX();
-  rtcnt_t end = start + US2RTC(SystemCoreClock, OTG_OPERATION_TIMEOUT);
-
-  do {
-    if ((usbp->otg->GRSTCTL & mask) == match) {
-      return false;
-    }
-  } while (chSysIsCounterWithinX(chSysGetRealtimeCounterX(), start, end));
-
-  return true;
-}
-
 static bool otg_core_reset(hal_usb_driver_c *usbp) {
   stm32_otg_t *otgp = usbp->otg;
 
   /* Wait AHB idle condition.*/
-  if (otg_wait_grstctl(usbp, GRSTCTL_AHBIDL, GRSTCTL_AHBIDL)) {
+  if (halRegWaitAllSet32X(&otgp->GRSTCTL, GRSTCTL_AHBIDL,
+                          OTG_OPERATION_TIMEOUT, NULL)) {
     return true;
   }
 
@@ -163,7 +149,8 @@ static bool otg_core_reset(hal_usb_driver_c *usbp) {
 
   /* Core reset.*/
   otgp->GRSTCTL = GRSTCTL_CSRST;
-  if (otg_wait_grstctl(usbp, GRSTCTL_CSRST, 0U)) {
+  if (halRegWaitAllClear32X(&otgp->GRSTCTL, GRSTCTL_CSRST,
+                            OTG_OPERATION_TIMEOUT, NULL)) {
     return true;
   }
 
@@ -171,7 +158,8 @@ static bool otg_core_reset(hal_usb_driver_c *usbp) {
   chSysPolledDelayX(US2RTC(SystemCoreClock, 1U));
 
   /* Wait AHB idle condition again.*/
-  return otg_wait_grstctl(usbp, GRSTCTL_AHBIDL, GRSTCTL_AHBIDL);
+  return halRegWaitAllSet32X(&otgp->GRSTCTL, GRSTCTL_AHBIDL,
+                             OTG_OPERATION_TIMEOUT, NULL);
 }
 
 static bool otg_uses_integrated_hs_phy(hal_usb_driver_c *usbp) {
@@ -331,7 +319,8 @@ static bool otg_rxfifo_flush(hal_usb_driver_c *usbp) {
   stm32_otg_t *otgp = usbp->otg;
 
   otgp->GRSTCTL = GRSTCTL_RXFFLSH;
-  if (otg_wait_grstctl(usbp, GRSTCTL_RXFFLSH, 0U)) {
+  if (halRegWaitAllClear32X(&otgp->GRSTCTL, GRSTCTL_RXFFLSH,
+                            OTG_OPERATION_TIMEOUT, NULL)) {
     otg_fault(usbp);
     return true;
   }
@@ -345,7 +334,8 @@ static bool otg_txfifo_flush(hal_usb_driver_c *usbp, uint32_t fifo) {
   stm32_otg_t *otgp = usbp->otg;
 
   otgp->GRSTCTL = GRSTCTL_TXFNUM(fifo) | GRSTCTL_TXFFLSH;
-  if (otg_wait_grstctl(usbp, GRSTCTL_TXFFLSH, 0U)) {
+  if (halRegWaitAllClear32X(&otgp->GRSTCTL, GRSTCTL_TXFFLSH,
+                            OTG_OPERATION_TIMEOUT, NULL)) {
     otg_fault(usbp);
     return true;
   }
@@ -374,7 +364,8 @@ static bool otg_ep0_abort_in(hal_usb_driver_c *usbp) {
   }
 
   /* Do not flush while the core can still access this FIFO. OUT EP0 must
-     not be disabled, and the shared RX FIFO contains the new SETUP.*/
+     not be disabled, and the shared RX FIFO contains the new SETUP.
+     Both registers share one deadline, unlike separate safety API waits.*/
   while (((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) != 0U) ||
          ((otgp->GRSTCTL & GRSTCTL_AHBIDL) == 0U)) {
     if (!chSysIsCounterWithinX(chSysGetRealtimeCounterX(), start, end)) {
@@ -859,7 +850,9 @@ irq_retry:
     }
 
     /* Re-enable endpoint IRQs if they have been disabled by suspend before.*/
-    otg_enable_ep(usbp);
+    if (usbp->state == USB_SUSPENDED) {
+      otg_enable_ep(usbp);
+    }
 
     /* Clear the Remote Wake-up Signaling.*/
     otgp->DCTL &= ~DCTL_RWUSIG;
@@ -909,14 +902,14 @@ irq_retry:
     if (usbp->state == USB_SUSPENDED) {
       /* Set to zero to un-gate the USB core clocks.*/
       otgp->PCGCCTL &= ~(PCGCCTL_STPPCLK | PCGCCTL_GATEHCLK);
+
+      /* Restore endpoint IRQs once, before wake-up hooks can rearm them.*/
+      otg_enable_ep(usbp);
       _usb_wakeup(usbp);
       if (usbp->state == USB_ERROR) {
         return;
       }
     }
-
-    /* Re-enable endpoint irqs if they have been disabled by suspend before.*/
-    otg_enable_ep(usbp);
 
     _usb_isr_invoke_sof_cb(usbp);
     if (usbp->state == USB_ERROR) {
