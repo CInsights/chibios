@@ -357,21 +357,6 @@ typedef struct {
   ((usbp)->epc[ep]->out_state->rxcnt)
 
 /**
- * @brief   Connects the USB device.
- *
- * @notapi
- */
-#if (STM32_OTG_STEPPING == 1) || defined(__DOXYGEN__)
-#define usb_lld_connect_bus(usbp)                                           \
-  do {                                                                      \
-    (usbp)->otg->GCCFG |= GCCFG_VBUSBSEN;                                   \
-    (usbp)->otg->DCTL &= ~DCTL_SDIS;                                        \
-  } while (false)
-#else
-#define usb_lld_connect_bus(usbp) ((usbp)->otg->DCTL &= ~DCTL_SDIS)
-#endif
-
-/**
  * @brief   Disconnect the USB device.
  *
  * @notapi
@@ -385,25 +370,6 @@ typedef struct {
 #else
 #define usb_lld_disconnect_bus(usbp) ((usbp)->otg->DCTL |= DCTL_SDIS)
 #endif
-
-/**
- * @brief   Start of host wake-up procedure.
- *
- * @notapi
- */
-#define usb_lld_wakeup_host(usbp)                                           \
-  do {                                                                      \
-    /* Turning clocks back on (may be required if coming out of suspend
-       mode).*/                                                             \
-    (usbp)->otg->PCGCCTL &= ~(PCGCCTL_STPPCLK | PCGCCTL_GATEHCLK);          \
-    (usbp)->otg->DCTL |= DCTL_RWUSIG;                                       \
-    /* remote wakeup doesn't trigger the wakeup interrupt, therefore
-       we use the SOF interrupt to detect resume of the bus.*/              \
-    (usbp)->otg->GINTSTS = GINTSTS_SOF;                                     \
-    (usbp)->otg->GINTMSK |= GINTMSK_SOFM;                                   \
-    chThdSleepMilliseconds(STM32_USB_HOST_WAKEUP_DURATION);                 \
-    (usbp)->otg->DCTL &= ~DCTL_RWUSIG;                                      \
-  } while (false)
 
 /*===========================================================================*/
 /* External declarations.                                                    */
@@ -443,6 +409,8 @@ extern "C" {
   void usb_lld_set_address(hal_usb_driver_c *usbp);
   void usb_lld_init_endpoint(hal_usb_driver_c *usbp, usbep_t ep);
   void usb_lld_disable_endpoints(hal_usb_driver_c *usbp);
+  void usb_lld_connect_bus(hal_usb_driver_c *usbp);
+  void usb_lld_wakeup_host(hal_usb_driver_c *usbp);
   uint16_t usb_lld_get_frame_number(hal_usb_driver_c *usbp);
   usbepstatus_t usb_lld_get_status_in(hal_usb_driver_c *usbp, usbep_t ep);
   usbepstatus_t usb_lld_get_status_out(hal_usb_driver_c *usbp, usbep_t ep);

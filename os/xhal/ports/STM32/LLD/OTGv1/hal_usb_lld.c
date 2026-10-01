@@ -38,6 +38,9 @@
 #define EP0_MAX_INSIZE          64
 #define EP0_MAX_OUTSIZE         64
 
+/* Upper bound for a core reset, FIFO flush or EP0 disable handshake, in us.*/
+#define OTG_OPERATION_TIMEOUT   1000U
+
 /** @brief Enables delay in ULPI timing during device chirp.*/
 #define USB_OTG_DCFG_XCVRDLY    (1U << 14)
 
@@ -131,12 +134,28 @@ static const stm32_otg_params_t hsparams = {
 /* Driver local functions.                                                   */
 /*===========================================================================*/
 
-static void otg_core_reset(hal_usb_driver_c *usbp) {
+/* Returns true on timeout. The realtime counter also runs with IRQs masked.*/
+static bool otg_wait_grstctl(hal_usb_driver_c *usbp, uint32_t mask,
+                             uint32_t match) {
+  rtcnt_t start = chSysGetRealtimeCounterX();
+  rtcnt_t end = start + US2RTC(SystemCoreClock, OTG_OPERATION_TIMEOUT);
+
+  do {
+    if ((usbp->otg->GRSTCTL & mask) == match) {
+      return false;
+    }
+  } while (chSysIsCounterWithinX(chSysGetRealtimeCounterX(), start, end));
+
+  return true;
+}
+
+static bool otg_core_reset(hal_usb_driver_c *usbp) {
   stm32_otg_t *otgp = usbp->otg;
 
   /* Wait AHB idle condition.*/
-  while ((otgp->GRSTCTL & GRSTCTL_AHBIDL) == 0)
-    ;
+  if (otg_wait_grstctl(usbp, GRSTCTL_AHBIDL, GRSTCTL_AHBIDL)) {
+    return true;
+  }
 
   /* Allow at least 10 PHY clocks after PHY selection before core reset.
      One microsecond covers both the 48MHz FS and 60MHz HS interfaces.*/
@@ -144,15 +163,15 @@ static void otg_core_reset(hal_usb_driver_c *usbp) {
 
   /* Core reset.*/
   otgp->GRSTCTL = GRSTCTL_CSRST;
-  while ((otgp->GRSTCTL & GRSTCTL_CSRST) != 0)
-    ;
+  if (otg_wait_grstctl(usbp, GRSTCTL_CSRST, 0U)) {
+    return true;
+  }
 
   /* Wait at least 3 PHY clocks before accessing the PHY clock domain.*/
   chSysPolledDelayX(US2RTC(SystemCoreClock, 1U));
 
   /* Wait AHB idle condition again.*/
-  while ((otgp->GRSTCTL & GRSTCTL_AHBIDL) == 0)
-    ;
+  return otg_wait_grstctl(usbp, GRSTCTL_AHBIDL, GRSTCTL_AHBIDL);
 }
 
 static bool otg_uses_integrated_hs_phy(hal_usb_driver_c *usbp) {
@@ -290,24 +309,50 @@ static void otg_enable_ep(hal_usb_driver_c *usbp) {
   otgp->DAINTMSK = daintmsk;
 }
 
-static void otg_rxfifo_flush(hal_usb_driver_c *usbp) {
+/* Called from unlocked IRQ handlers or locked endpoint initialization.
+   Keep clocks on until drvStop(), but do not permit further bus activity.*/
+static void otg_fault(hal_usb_driver_c *usbp) {
+  stm32_otg_t *otgp = usbp->otg;
+  syssts_t sts = chSysGetStatusAndLockX();
+
+  otgp->GAHBCFG = 0U;
+  otgp->GINTMSK = 0U;
+  otgp->DAINTMSK = 0U;
+  otgp->DIEPEMPMSK = 0U;
+  usb_lld_disconnect_bus(usbp);
+  otgp->DCTL &= ~DCTL_RWUSIG;
+  usbp->isoc_in_pending = 0U;
+  usbp->ep0setup_pending = false;
+  _usb_error_i(usbp);
+  chSysRestoreStatusX(sts);
+}
+
+static bool otg_rxfifo_flush(hal_usb_driver_c *usbp) {
   stm32_otg_t *otgp = usbp->otg;
 
   otgp->GRSTCTL = GRSTCTL_RXFFLSH;
-  while ((otgp->GRSTCTL & GRSTCTL_RXFFLSH) != 0)
-    ;
+  if (otg_wait_grstctl(usbp, GRSTCTL_RXFFLSH, 0U)) {
+    otg_fault(usbp);
+    return true;
+  }
   /* Wait at least 3 PHY clocks, independently of the CPU frequency.*/
   chSysPolledDelayX(US2RTC(SystemCoreClock, 1U));
+
+  return false;
 }
 
-static void otg_txfifo_flush(hal_usb_driver_c *usbp, uint32_t fifo) {
+static bool otg_txfifo_flush(hal_usb_driver_c *usbp, uint32_t fifo) {
   stm32_otg_t *otgp = usbp->otg;
 
   otgp->GRSTCTL = GRSTCTL_TXFNUM(fifo) | GRSTCTL_TXFFLSH;
-  while ((otgp->GRSTCTL & GRSTCTL_TXFFLSH) != 0)
-    ;
+  if (otg_wait_grstctl(usbp, GRSTCTL_TXFFLSH, 0U)) {
+    otg_fault(usbp);
+    return true;
+  }
   /* Wait at least 3 PHY clocks, independently of the CPU frequency.*/
   chSysPolledDelayX(US2RTC(SystemCoreClock, 1U));
+
+  return false;
 }
 
 /**
@@ -318,9 +363,10 @@ static void otg_txfifo_flush(hal_usb_driver_c *usbp, uint32_t fifo) {
  *
  * @notapi
  */
-static void otg_ep0_abort_in(hal_usb_driver_c *usbp) {
+static bool otg_ep0_abort_in(hal_usb_driver_c *usbp) {
   stm32_otg_t *otgp = usbp->otg;
-  unsigned timeout = 1000U;
+  rtcnt_t start = chSysGetRealtimeCounterX();
+  rtcnt_t end = start + US2RTC(SystemCoreClock, OTG_OPERATION_TIMEOUT);
 
   otgp->DIEPEMPMSK &= ~DIEPEMPMSK_INEPTXFEM(0);
   if ((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) != 0U) {
@@ -331,13 +377,17 @@ static void otg_ep0_abort_in(hal_usb_driver_c *usbp) {
      not be disabled, and the shared RX FIFO contains the new SETUP.*/
   while (((otgp->ie[0].DIEPCTL & DIEPCTL_EPENA) != 0U) ||
          ((otgp->GRSTCTL & GRSTCTL_AHBIDL) == 0U)) {
-    if (--timeout == 0U) {
-      chSysHalt("EP0 IN disable timeout");
+    if (!chSysIsCounterWithinX(chSysGetRealtimeCounterX(), start, end)) {
+      otg_fault(usbp);
+      return true;
     }
-    chSysPolledDelayX(US2RTC(SystemCoreClock, 1U));
   }
-  otg_txfifo_flush(usbp, 0U);
+  if (otg_txfifo_flush(usbp, 0U)) {
+    return true;
+  }
   otgp->ie[0].DIEPINT = 0xFFFFFFFFU;
+
+  return false;
 }
 
 /**
@@ -580,6 +630,9 @@ static void otg_epin_handler(hal_usb_driver_c *usbp, usbep_t ep) {
   uint32_t epint = otgp->ie[ep].DIEPINT;
   uint32_t epmask = 1U << ep;
 
+  if (usbp->state == USB_ERROR) {
+    return;
+  }
   otgp->ie[ep].DIEPINT = epint;
   if ((usbp->epc[ep] == NULL) || (usbp->epc[ep]->in_state == NULL)) {
     usbp->isoc_in_pending &= ~epmask;
@@ -593,7 +646,9 @@ static void otg_epin_handler(hal_usb_driver_c *usbp, usbep_t ep) {
         ((otgp->DIEPMSK & DIEPMSK_EPDM) != 0U) &&
         ((otgp->ie[ep].DIEPCTL & DIEPCTL_EPENA) == 0U)) {
       usbp->isoc_in_pending &= ~epmask;
-      otg_txfifo_flush(usbp, ep);
+      if (otg_txfifo_flush(usbp, ep)) {
+        return;
+      }
       _usb_isr_invoke_in_cb(usbp, ep);
     }
     /* The callback can rearm or retire this endpoint. Do not process other
@@ -640,6 +695,9 @@ static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep, bool setup) {
   stm32_otg_t *otgp = usbp->otg;
   uint32_t epint = otgp->oe[ep].DOEPINT;
 
+  if (usbp->state == USB_ERROR) {
+    return;
+  }
   /* STUP is acknowledged here, but only its ordered FIFO marker can
      dispatch a SETUP. A late endpoint interrupt must not dispatch it again.*/
   otgp->oe[ep].DOEPINT = epint;
@@ -670,13 +728,18 @@ static void otg_epout_handler(hal_usb_driver_c *usbp, usbep_t ep, bool setup) {
     }
 
     _usb_isr_invoke_out_cb(usbp, ep);
+    if (usbp->state == USB_ERROR) {
+      return;
+    }
   }
 
   if (setup) {
     if (ep == 0U) {
       /* Any completed status stage has been delivered first. Discard the
          remaining IN transaction before waking the new SETUP owner.*/
-      otg_ep0_abort_in(usbp);
+      if (otg_ep0_abort_in(usbp)) {
+        return;
+      }
       usbp->ep0setup_pending = false;
     }
     _usb_isr_invoke_setup_cb(usbp, ep);
@@ -748,6 +811,9 @@ static void otg_isoc_out_failed_handler(hal_usb_driver_c *usbp) {
 #endif
       /* Prepare transfer for next frame.*/
       _usb_isr_invoke_out_cb(usbp, ep);
+      if (usbp->state == USB_ERROR) {
+        return;
+      }
     }
   }
 }
@@ -767,6 +833,9 @@ void usb_lld_serve_interrupt(hal_usb_driver_c *usbp) {
 
 irq_retry:
 
+  if (usbp->state == USB_ERROR) {
+    return;
+  }
   sts  = otgp->GINTSTS;
   sts &= otgp->GINTMSK;
   otgp->GINTSTS = sts;
@@ -796,6 +865,9 @@ irq_retry:
     otgp->DCTL &= ~DCTL_RWUSIG;
 
     _usb_wakeup(usbp);
+    if (usbp->state == USB_ERROR) {
+      return;
+    }
   }
 
   /* Suspend handling.*/
@@ -805,6 +877,9 @@ irq_retry:
 
     /* Default suspend action.*/
     _usb_suspend(usbp);
+    if (usbp->state == USB_ERROR) {
+      return;
+    }
   }
 
   /* Enumeration done.*/
@@ -835,12 +910,18 @@ irq_retry:
       /* Set to zero to un-gate the USB core clocks.*/
       otgp->PCGCCTL &= ~(PCGCCTL_STPPCLK | PCGCCTL_GATEHCLK);
       _usb_wakeup(usbp);
+      if (usbp->state == USB_ERROR) {
+        return;
+      }
     }
 
     /* Re-enable endpoint irqs if they have been disabled by suspend before.*/
     otg_enable_ep(usbp);
 
     _usb_isr_invoke_sof_cb(usbp);
+    if (usbp->state == USB_ERROR) {
+      return;
+    }
   }
 
   /* Isochronous IN failed handling */
@@ -851,6 +932,10 @@ irq_retry:
   /* Isochronous OUT failed handling */
   if (sts & GINTSTS_IISOOXFR) {
     otg_isoc_out_failed_handler(usbp);
+  }
+
+  if (usbp->state == USB_ERROR) {
+    return;
   }
 
   /* Drain RX data, dispatching SETUP at its FIFO completion marker.*/
@@ -868,9 +953,15 @@ irq_retry:
     /* In particular, complete EP0 IN status before accepting a new SETUP.*/
     if ((sts & GINTSTS_IEPINT) && (src & DAINTMSK_IEPM(ep))) {
       otg_epin_handler(usbp, (usbep_t)ep);
+      if (usbp->state == USB_ERROR) {
+        return;
+      }
     }
     if ((sts & GINTSTS_OEPINT) && (src & DAINTMSK_OEPM(ep))) {
       otg_epout_handler(usbp, (usbep_t)ep, false);
+      if (usbp->state == USB_ERROR) {
+        return;
+      }
     }
   }
 
@@ -943,11 +1034,14 @@ const hal_usb_config_t *usb_lld_selcfg(hal_usb_driver_c *usbp,
 
 /**
  * @brief   Configures and activates the USB peripheral.
- * @note    Starting the OTG cell can be a slow operation carried out with
- *          interrupts disabled, perform it before starting time-critical
- *          operations.
+ * @note    Starting the OTG cell polls for hardware readiness. Perform it
+ *          before starting time-critical operations.
  *
  * @param[in] usbp      pointer to the @p hal_usb_driver_c object
+ * @return              The operation status.
+ * @retval HAL_RET_SUCCESS        if the peripheral has been started.
+ * @retval HAL_RET_CONFIG_ERROR   if the USB clock is invalid.
+ * @retval HAL_RET_HW_FAILURE     if a core-reset handshake times out.
  *
  * @notapi
  */
@@ -1017,7 +1111,9 @@ msg_t usb_lld_start(hal_usb_driver_c *usbp) {
 
   if (otg_uses_integrated_hs_phy(usbp)) {
     /* The integrated PHY clock is required by the soft core reset.*/
-    otg_core_reset(usbp);
+    if (otg_core_reset(usbp)) {
+      goto failed;
+    }
     otg_device_configure(usbp);
     otg_vbus_configure(usbp);
   }
@@ -1025,7 +1121,9 @@ msg_t usb_lld_start(hal_usb_driver_c *usbp) {
     /* Legacy PHY interface selection must precede the soft core reset.*/
     otg_device_configure(usbp);
     otg_vbus_configure(usbp);
-    otg_core_reset(usbp);
+    if (otg_core_reset(usbp)) {
+      goto failed;
+    }
   }
 
   /* Interrupts on TXFIFOs half empty.*/
@@ -1057,6 +1155,13 @@ msg_t usb_lld_start(hal_usb_driver_c *usbp) {
   otgp->GAHBCFG |= GAHBCFG_GINTMSK;
 
   return HAL_RET_SUCCESS;
+
+failed:
+  /* No endpoint has been exposed to the HLD yet. Disconnect, mask IRQs
+     and release the core/PHY clocks so that drvStart() can be retried.*/
+  usb_lld_stop(usbp);
+
+  return HAL_RET_HW_FAILURE;
 }
 
 /**
@@ -1113,7 +1218,9 @@ void usb_lld_reset(hal_usb_driver_c *usbp) {
 
   usbp->isoc_in_pending = 0U;
   /* Flush all Tx FIFOs.*/
-  otg_txfifo_flush(usbp, 0x10U);
+  if (otg_txfifo_flush(usbp, 0x10U)) {
+    return;
+  }
 
   /* Endpoint interrupts all disabled and cleared.*/
   otgp->DIEPEMPMSK = 0;
@@ -1132,7 +1239,9 @@ void usb_lld_reset(hal_usb_driver_c *usbp) {
 
   /* Receive FIFO size initialization, the address is always zero.*/
   otgp->GRXFSIZ = usbp->otgparams->rx_fifo_size;
-  otg_rxfifo_flush(usbp);
+  if (otg_rxfifo_flush(usbp)) {
+    return;
+  }
 
   /* Resets the device address to zero.*/
   otgp->DCFG = (otgp->DCFG & ~DCFG_DAD_MASK) | DCFG_DAD(0) | BOARD_OTG2_ULPI_CHIRP_DELAY_MASK;
@@ -1239,7 +1348,9 @@ void usb_lld_init_endpoint(hal_usb_driver_c *usbp, usbep_t ep) {
     }
     otgp->DIEPTXF[ep - 1] = DIEPTXF_INEPTXFD(fsize) |
                             DIEPTXF_INEPTXSA(otg_ram_alloc(usbp, fsize));
-    otg_txfifo_flush(usbp, ep);
+    if (otg_txfifo_flush(usbp, ep)) {
+      return;
+    }
 
     otgp->ie[ep].DIEPCTL = ctl |
                            DIEPCTL_TXFNUM(ep) |
@@ -1248,7 +1359,9 @@ void usb_lld_init_endpoint(hal_usb_driver_c *usbp, usbep_t ep) {
   }
   else {
     otgp->DIEPTXF[ep - 1] = 0x02000400; /* Reset value.*/
-    otg_txfifo_flush(usbp, ep);
+    if (otg_txfifo_flush(usbp, ep)) {
+      return;
+    }
     otgp->ie[ep].DIEPCTL &= ~DIEPCTL_USBAEP;
     otgp->DAINTMSK &= ~DAINTMSK_IEPM(ep);
   }
@@ -1284,6 +1397,56 @@ void usb_lld_disable_endpoints(hal_usb_driver_c *usbp) {
     otgp->oe[ep].DOEPINT = 0xFFFFFFFFU;
   }
 }
+/**
+ * @brief   Connects the USB device unless a runtime fault is latched.
+ *
+ * @param[in] usbp      pointer to the @p hal_usb_driver_c object
+ *
+ * @notapi
+ */
+void usb_lld_connect_bus(hal_usb_driver_c *usbp) {
+
+  /* Keep the check and pull-up control atomic against the fault handler.*/
+  chSysLock();
+  if (usbp->state != USB_ERROR) {
+#if STM32_OTG_STEPPING == 1
+    usbp->otg->GCCFG |= GCCFG_VBUSBSEN;
+#endif
+    usbp->otg->DCTL &= ~DCTL_SDIS;
+  }
+  chSysUnlock();
+}
+
+/**
+ * @brief   Starts the host wake-up procedure.
+ *
+ * @param[in] usbp      pointer to the @p hal_usb_driver_c object
+ *
+ * @notapi
+ */
+void usb_lld_wakeup_host(hal_usb_driver_c *usbp) {
+  stm32_otg_t *otgp = usbp->otg;
+
+  /* Do not race a runtime fault and restore interrupt enables after it.*/
+  chSysLock();
+  if (usbp->state == USB_ERROR) {
+    chSysUnlock();
+    return;
+  }
+  otgp->PCGCCTL &= ~(PCGCCTL_STPPCLK | PCGCCTL_GATEHCLK);
+  otgp->DCTL |= DCTL_RWUSIG;
+  /* Remote wakeup uses SOF to detect the host's resumption.*/
+  otgp->GINTSTS = GINTSTS_SOF;
+  otgp->GINTMSK |= GINTMSK_SOFM;
+  chSysUnlock();
+
+  chThdSleepMilliseconds(STM32_USB_HOST_WAKEUP_DURATION);
+
+  chSysLock();
+  otgp->DCTL &= ~DCTL_RWUSIG;
+  chSysUnlock();
+}
+
 /**
  * @brief   Returns the current 11-bit USB frame number.
  * @details High-speed microframe bits are excluded, so the frame number

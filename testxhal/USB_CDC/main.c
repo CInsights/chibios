@@ -160,6 +160,12 @@ static THD_FUNCTION(Ep0Thread, arg) {
 
     /* Blocks until a new SETUP packet arrives or the bus is reset. */
     msg = usbEp0WaitSetup(&PORTAB_USB1);
+    if (msg == HAL_RET_HW_FAILURE) {
+      /* Leave application-controlled recovery possible without spinning
+         on the latched controller fault.*/
+      chThdSleepMilliseconds(100);
+      continue;
+    }
     if (msg != MSG_OK) {
       continue;
     }

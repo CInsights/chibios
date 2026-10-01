@@ -51,6 +51,13 @@ static THD_FUNCTION(Ep0Thread, arg) {
     msg_t msg;
 
     msg = usbEp0WaitSetup(&PORTAB_USB1);
+    if (msg == HAL_RET_HW_FAILURE) {
+      /* The fault stays latched for application-controlled stop/restart.
+         Do not starve the rest of the application by retrying a failed
+         controller in a tight loop.*/
+      chThdSleepMilliseconds(100);
+      continue;
+    }
     if (msg != MSG_OK) {
       continue;
     }
