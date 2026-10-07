@@ -23,6 +23,15 @@
  * @note    The application must serialize flash and ICACHE management. Code,
  *          vectors and constants needed during programming or erasing must
  *          reside outside the busy physical bank to avoid execution stalls.
+ * @note    ECC status flags are sticky and controller-wide. The driver leaves
+ *          them intact: the application must capture the ECC diagnostics and
+ *          promptly acknowledge correctable errors by clearing ECCC. Retained
+ *          ECCC or ECCD makes subsequent reads and erase verifications report
+ *          FLASH_ERROR_READ even when the accessed data has no new error.
+ *          Retaining ECCC can also suppress a subsequent double-error NMI;
+ *          prompt acknowledgement preserves ECC error detection. See RM0456
+ *          section 7.3.2 and UM2875, FLASH_SM_7. Clearing status is not repair
+ *          of the affected flash contents or permission to resume failed work.
  * @note    Uncorrectable ECC faults raise NMI. Application NMI policy remains
  *          responsible for handling these faults; a normal return from a read
  *          encountering such a fault cannot be guaranteed by this driver.
